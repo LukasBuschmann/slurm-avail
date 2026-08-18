@@ -60,12 +60,6 @@ slurm-avail
 pipx install slurm-avail
 ```
 
-To install the latest development version directly from GitHub:
-
-```console
-uv tool install git+https://github.com/LukasBuschmann/slurm-avail.git
-```
-
 The package has no third-party runtime dependencies.
 
 ## Quick start
