@@ -1,0 +1,36 @@
+version = 1
+
+[settings]
+node_refresh_seconds = 10
+filesystem_refresh_seconds = 60
+login_refresh_seconds = 60
+forecast_refresh_seconds = 300
+failed_retry_seconds = 10
+ssh_connect_timeout_seconds = 8
+command_timeout_seconds = 20
+login_probe_timeout_seconds = 10
+filesystem_probe_timeout_seconds = 2
+retries_per_address = 0
+retry_delay_seconds = 1
+forecast_horizon_days = 365
+
+[[clusters]]
+name = "LOCAL"
+mode = "local"
+addresses = []
+focus = "auto"
+hidden = false
+filesystems = ["/home"]
+slurm_bin_path = ""
+exclude_partitions = []
+
+[[clusters]]
+name = "GPU CLUSTER"
+mode = "ssh"
+addresses = ["login1.example.org", "login2.example.org"]
+user = "cluster-user"
+focus = "gpu"
+hidden = false
+filesystems = ["/home", "/scratch"]
+slurm_bin_path = "/opt/slurm/bin"
+exclude_partitions = ["interactive"]
