@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="assets/slurm-avail-logo.png" alt="slurm-avail" width="680">
+  <img src="https://raw.githubusercontent.com/LukasBuschmann/slurm-avail/main/assets/slurm-avail-logo.png" alt="slurm-avail" width="680">
 </p>
 
 <p align="center">
@@ -19,7 +19,7 @@ the HPC systems; the dashboard uses their existing Slurm command-line tools.
 
 | Live multi-cluster overview | Scheduler forecast |
 | --- | --- |
-| ![Node availability across four Slurm clusters](assets/nodes-dashboard.png) | ![Per-node scheduler reservation and running-job forecast](assets/scheduler-forecast.png) |
+| ![Node availability across four Slurm clusters](https://raw.githubusercontent.com/LukasBuschmann/slurm-avail/main/assets/nodes-dashboard.png) | ![Per-node scheduler reservation and running-job forecast](https://raw.githubusercontent.com/LukasBuschmann/slurm-avail/main/assets/scheduler-forecast.png) |
 
 ## Views
 

@@ -27,7 +27,7 @@ def package_version() -> str:
     try:
         return version("slurm-avail")
     except PackageNotFoundError:
-        return "0.1.0.dev0"
+        return "0.1.1.dev0"
 
 
 def initial_cluster_index(config: AppConfig, requested: str | None) -> int:
