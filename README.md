@@ -47,23 +47,23 @@ dashboard settings. Everything is persisted in a readable TOML file.
 
 ## Installation
 
-Install the current GitHub version with [`uv`](https://docs.astral.sh/uv/):
-
-```console
-uv tool install git+https://github.com/LukasBuschmann/slurm-avail.git
-slurm-avail
-```
-
-After the first PyPI release, installation is simply:
+Install from PyPI with [`uv`](https://docs.astral.sh/uv/):
 
 ```console
 uv tool install slurm-avail
+slurm-avail
 ```
 
 [`pipx`](https://pipx.pypa.io/) is also supported:
 
 ```console
 pipx install slurm-avail
+```
+
+To install the latest development version directly from GitHub:
+
+```console
+uv tool install git+https://github.com/LukasBuschmann/slurm-avail.git
 ```
 
 The package has no third-party runtime dependencies.
