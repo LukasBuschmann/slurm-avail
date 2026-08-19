@@ -346,8 +346,10 @@ def forecast_table(
             ),
         ]
         running_delta = [0] * (interval_count + 1)
+        user_running_delta = [0] * (interval_count + 1)
         active_job_delta = [0] * (interval_count + 1)
         reservation_delta = [0] * (interval_count + 1)
+        user_reservation_delta = [0] * (interval_count + 1)
         for job in jobs_by_node[node.name]:
             end_index = min(
                 interval_count,
@@ -361,6 +363,9 @@ def forecast_table(
             units = job.gpu_per_node if has_gpus else job.cpu_per_node
             running_delta[0] += units
             running_delta[end_index] -= units
+            if job.mine:
+                user_running_delta[0] += units
+                user_running_delta[end_index] -= units
             active_job_delta[0] += 1
             active_job_delta[end_index] -= 1
         for reservation in reservations_by_node[node.name]:
@@ -384,23 +389,51 @@ def forecast_table(
                 continue
             reservation_delta[start_index] += 1
             reservation_delta[end_index] -= 1
+            if reservation.mine:
+                user_reservation_delta[start_index] += 1
+                user_reservation_delta[end_index] -= 1
 
         running = 0
+        user_running = 0
         active_job_count = 0
         reservation_count = 0
+        user_reservation_count = 0
         for interval_index in range(interval_count):
             total = node.gpu_total if has_gpus else node.cpu_total
             running += running_delta[interval_index]
+            user_running += user_running_delta[interval_index]
             active_job_count += active_job_delta[interval_index]
             reservation_count += reservation_delta[interval_index]
+            user_reservation_count += user_reservation_delta[interval_index]
             reserved = total if reservation_count else 0
             displayed_running = running
             if node.status == "exclusive" and active_job_count:
                 displayed_running = total
             displayed_running = min(total, displayed_running)
+            displayed_user_running = min(total, user_running)
             reservation_glyph = forecast_glyph(reserved, total)
             running_glyph = forecast_glyph(displayed_running, total)
-            if reserved and displayed_running:
+            if user_reservation_count and displayed_running:
+                glyph = forecast_glyph(
+                    max(reserved, displayed_running),
+                    total,
+                )
+                style = "forecast_mine_overlap"
+            elif user_reservation_count:
+                glyph = reservation_glyph
+                style = "forecast_mine_reserved"
+            elif displayed_user_running and reserved:
+                glyph = forecast_glyph(
+                    max(reserved, displayed_running),
+                    total,
+                )
+                style = "forecast_mine_overlap"
+            elif displayed_user_running:
+                # Color identifies ownership; height continues to represent
+                # the node's total running allocation.
+                glyph = running_glyph
+                style = "forecast_mine_usage"
+            elif reserved and displayed_running:
                 glyph = forecast_glyph(
                     max(reserved, displayed_running),
                     total,
@@ -457,6 +490,9 @@ def forecast_legend_lines(
         line(("█", "forecast_reserved"), (" reservation", "normal")),
         line(("█", "forecast_running"), (" running to time limit", "normal")),
         line(("█", "forecast_overlap"), (" reservation + running", "normal")),
+        line(("█", "forecast_mine_usage"), (" includes your usage", "normal")),
+        line(("█", "forecast_mine_reserved"), (" your reservation", "normal")),
+        line(("█", "forecast_mine_overlap"), (" yours + overlap", "normal")),
         line(("▁…█", "normal"), (f" {resource_name} fraction", "normal")),
         line(("×", "drained"), (" down / drained now", "normal")),
         plain("fill rises bottom-up"),

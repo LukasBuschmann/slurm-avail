@@ -16,6 +16,7 @@ from .output import (
     render_config_once,
     render_filesystems_once,
     render_forecast_once,
+    render_jobs_once,
     render_logins_once,
     render_once,
 )
@@ -27,7 +28,7 @@ def package_version() -> str:
     try:
         return version("slurm-avail")
     except PackageNotFoundError:
-        return "0.1.1.dev0"
+        return "0.2.0.dev0"
 
 
 def initial_cluster_index(config: AppConfig, requested: str | None) -> int:
@@ -40,6 +41,22 @@ def initial_cluster_index(config: AppConfig, requested: str | None) -> int:
             return index
     requested_name = requested.casefold()
     for index, cluster in enumerate(clusters):
+        if cluster.name.casefold() == requested_name:
+            return index
+    raise ValueError(f"unknown cluster: {requested}")
+
+
+def initial_jobs_scope_index(config: AppConfig, requested: str | None) -> int:
+    clusters = active_cluster_configs(config)
+    if requested is None or requested.casefold() == "all":
+        return 0
+    if requested.isdigit():
+        scope_index = int(requested)
+        if 0 <= scope_index <= len(clusters):
+            return scope_index
+        raise ValueError(f"unknown Jobs scope: {requested}")
+    requested_name = requested.casefold()
+    for index, cluster in enumerate(clusters, start=1):
         if cluster.name.casefold() == requested_name:
             return index
     raise ValueError(f"unknown cluster: {requested}")
@@ -77,7 +94,10 @@ def main() -> int:
     )
     parser.add_argument(
         "--cluster",
-        help="initial forecast cluster name or 1-based number (default: first)",
+        help=(
+            "initial Jobs scope or Forecast cluster name/number "
+            "(Jobs defaults to All)"
+        ),
     )
     parser.add_argument(
         "--config",
@@ -95,10 +115,17 @@ def main() -> int:
     )
     try:
         config = load_config(config_path)
-        selected_cluster_index = initial_cluster_index(
-            config,
-            arguments.cluster,
-        )
+        if initial_view == "jobs":
+            jobs_scope_index = initial_jobs_scope_index(config, arguments.cluster)
+            selected_cluster_index = max(0, jobs_scope_index - 1)
+        else:
+            selected_cluster_index = initial_cluster_index(
+                config,
+                arguments.cluster,
+            )
+            jobs_scope_index = (
+                0 if arguments.cluster is None else selected_cluster_index + 1
+            )
     except (OSError, ValueError) as error:
         parser.error(str(error))
     context = f"{len(active_cluster_configs(config))} shown · {config_path.name}"
@@ -112,7 +139,9 @@ def main() -> int:
             arguments.user,
             include_filesystems=initial_view == "filesystems",
             check_login_nodes=initial_view == "logins",
-            include_schedule=initial_view == "forecast",
+            include_schedule=initial_view in ("nodes", "forecast"),
+            include_jobs=initial_view == "jobs",
+            include_history=initial_view == "jobs",
         )
         if initial_view == "filesystems":
             render_filesystems_once(clusters, context, config.settings)
@@ -123,6 +152,13 @@ def main() -> int:
                 clusters,
                 context,
                 selected_cluster_index,
+                config.settings,
+            )
+        elif initial_view == "jobs":
+            render_jobs_once(
+                clusters,
+                context,
+                jobs_scope_index,
                 config.settings,
             )
         else:
@@ -137,6 +173,7 @@ def main() -> int:
             config_path,
             arguments.user,
             selected_cluster_index,
+            jobs_scope_index,
         )
     return 0
 

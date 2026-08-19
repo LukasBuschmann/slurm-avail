@@ -10,6 +10,7 @@ from .config import AppConfig, DashboardSettings, active_cluster_configs
 from .config_views import config_table
 from .constants import CLUSTER_WIDTH, GAP, LOGIN_TABLE_WIDTH, Line
 from .forecast_views import forecast_legend_lines, forecast_table
+from .jobs_views import jobs_legend_lines, jobs_table
 from .models import Cluster, LoginNode
 from .node_views import (
     cluster_body,
@@ -176,6 +177,36 @@ def render_forecast_once(
             table_text = spans_text(body[row - header_height])
         else:
             table_text = ""
+        legend_text = spans_text(legend[row]) if row < len(legend) else ""
+        print(table_text[:table_width].ljust(legend_x) + "│ " + legend_text)
+
+
+def render_jobs_once(
+    clusters: list[Cluster],
+    context: str,
+    selected_index: int,
+    settings: DashboardSettings,
+) -> None:
+    print(spans_text(tab_line("jobs", context)))
+    print()
+    headers, body, details, table_width, _selected_body, _selected_job = jobs_table(
+        clusters,
+        selected_index,
+        0,
+    )
+    legend = jobs_legend_lines(
+        age_seconds=0,
+        refreshing=False,
+        refresh_seconds=settings.jobs_refresh_seconds,
+        history_age_seconds=0,
+        history_refreshing=False,
+        history_refresh_seconds=settings.jobs_history_refresh_seconds,
+    )
+    table_rows = headers + body + details
+    total_height = max(len(table_rows), len(legend))
+    legend_x = table_width + GAP
+    for row in range(total_height):
+        table_text = spans_text(table_rows[row]) if row < len(table_rows) else ""
         legend_text = spans_text(legend[row]) if row < len(legend) else ""
         print(table_text[:table_width].ljust(legend_x) + "│ " + legend_text)
 

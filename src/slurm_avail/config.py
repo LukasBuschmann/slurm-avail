@@ -14,6 +14,9 @@ class DashboardSettings:
     node_refresh_seconds: int = 10
     filesystem_refresh_seconds: int = 60
     login_refresh_seconds: int = 60
+    jobs_refresh_seconds: int = 10
+    jobs_history_refresh_seconds: int = 60
+    jobs_history_days: int = 7
     forecast_refresh_seconds: int = 300
     failed_retry_seconds: int = 10
     ssh_connect_timeout_seconds: int = 8
@@ -49,6 +52,9 @@ SETTING_FIELDS = (
     ("node_refresh_seconds", "Node refresh", 1, 3600),
     ("filesystem_refresh_seconds", "Filesystem refresh", 1, 86400),
     ("login_refresh_seconds", "Endpoint refresh", 1, 86400),
+    ("jobs_refresh_seconds", "Jobs refresh", 1, 86400),
+    ("jobs_history_refresh_seconds", "Job history refresh", 1, 86400),
+    ("jobs_history_days", "Job history days", 1, 3650),
     ("forecast_refresh_seconds", "Forecast refresh", 1, 86400),
     ("failed_retry_seconds", "Retry after failure", 1, 3600),
     ("ssh_connect_timeout_seconds", "SSH connect timeout", 1, 300),

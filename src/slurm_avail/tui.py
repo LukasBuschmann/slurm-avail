@@ -39,6 +39,12 @@ from .forecast_views import (
     forecast_node_label_width,
     forecast_table,
 )
+from .jobs_views import (
+    jobs_for_scope,
+    jobs_legend_lines,
+    jobs_table,
+    sticky_jobs_headers,
+)
 from .node_views import (
     cluster_body,
     cluster_header,
@@ -69,6 +75,8 @@ def init_colors() -> dict[str, int]:
             "running": 39,
             "exclusive": 141,
             "offline": 240,
+            "mine": 208,
+            "mine_reserved": 51,
         }
         forecast_background = 238
         forecast_colors = {
@@ -76,6 +84,9 @@ def init_colors() -> dict[str, int]:
             "forecast_reserved": 220,
             "forecast_running": 39,
             "forecast_overlap": 141,
+            "forecast_mine_usage": 208,
+            "forecast_mine_reserved": 51,
+            "forecast_mine_overlap": 201,
         }
     else:
         colors = {
@@ -88,6 +99,8 @@ def init_colors() -> dict[str, int]:
             "running": curses.COLOR_CYAN,
             "exclusive": curses.COLOR_BLUE,
             "offline": curses.COLOR_WHITE,
+            "mine": curses.COLOR_YELLOW,
+            "mine_reserved": curses.COLOR_CYAN,
         }
         forecast_background = curses.COLOR_BLACK
         forecast_colors = {
@@ -95,6 +108,9 @@ def init_colors() -> dict[str, int]:
             "forecast_reserved": curses.COLOR_YELLOW,
             "forecast_running": curses.COLOR_CYAN,
             "forecast_overlap": curses.COLOR_MAGENTA,
+            "forecast_mine_usage": curses.COLOR_YELLOW,
+            "forecast_mine_reserved": curses.COLOR_CYAN,
+            "forecast_mine_overlap": curses.COLOR_MAGENTA,
         }
 
     pairs: dict[str, int] = {"normal": curses.A_NORMAL, "title": curses.A_BOLD}
@@ -108,6 +124,11 @@ def init_colors() -> dict[str, int]:
         pair_number += 1
     pairs["busy"] |= curses.A_DIM
     pairs["offline"] |= curses.A_DIM
+    pairs["mine"] |= curses.A_BOLD
+    pairs["mine_reserved"] |= curses.A_BOLD
+    pairs["forecast_mine_usage"] |= curses.A_BOLD
+    pairs["forecast_mine_reserved"] |= curses.A_BOLD
+    pairs["forecast_mine_overlap"] |= curses.A_BOLD
     pairs["title"] |= pairs["cpu"]
     pairs["selected"] = pairs["title"] | curses.A_REVERSE
     return pairs
@@ -190,6 +211,7 @@ def dashboard(
     config_path: Path,
     user_override: str | None,
     initial_cluster_index: int,
+    initial_jobs_scope_index: int,
 ) -> None:
     screen.keypad(True)
     with contextlib.suppress(curses.error):
@@ -207,13 +229,20 @@ def dashboard(
     last_node_refresh: float | None = None
     last_filesystem_refresh: float | None = None
     last_login_refresh: float | None = None
+    last_jobs_refresh: float | None = None
+    last_history_refresh: float | None = None
     last_forecast_refresh: float | None = None
     next_node_refresh = 0.0
     next_filesystem_refresh = 0.0
     next_login_refresh = 0.0
+    next_jobs_refresh = 0.0
+    next_history_refresh = 0.0
     next_forecast_refresh = 0.0
     active_view = initial_view
     forecast_cluster_index = initial_cluster_index
+    jobs_cluster_index = initial_jobs_scope_index
+    jobs_job_indices: dict[str, int] = {}
+    jobs_selection_changed = True
     forecast_resolution_index = FORECAST_RESOLUTIONS.index(60)
     vertical_offsets = {view: 0 for view in VIEWS}
     horizontal_offsets = {view: 0 for view in VIEWS}
@@ -222,6 +251,8 @@ def dashboard(
     refresh_includes_filesystems = True
     refresh_checks_login_nodes = True
     refresh_includes_schedule = True
+    refresh_includes_jobs = True
+    refresh_includes_history = True
     refresh_generation = config_generation
     refresh_futures = submit_cluster_refreshes(
         executor,
@@ -230,6 +261,8 @@ def dashboard(
         refresh_includes_filesystems,
         refresh_checks_login_nodes,
         refresh_includes_schedule,
+        refresh_includes_jobs,
+        refresh_includes_history,
     )
 
     try:
@@ -263,6 +296,8 @@ def dashboard(
                     refresh_includes_filesystems,
                     refresh_checks_login_nodes,
                     refresh_includes_schedule,
+                    refresh_includes_jobs,
+                    refresh_includes_history,
                 )
                 last_node_refresh = now
                 if refresh_includes_filesystems:
@@ -271,6 +306,10 @@ def dashboard(
                     last_login_refresh = now
                 if refresh_includes_schedule:
                     last_forecast_refresh = now
+                if refresh_includes_schedule or refresh_includes_jobs:
+                    last_jobs_refresh = now
+                if refresh_includes_history:
+                    last_history_refresh = now
 
             if (
                 completed_futures
@@ -290,16 +329,33 @@ def dashboard(
                     next_login_refresh = now + settings.login_refresh_seconds
                 if refresh_includes_schedule:
                     next_forecast_refresh = now + settings.forecast_refresh_seconds
+                if refresh_includes_schedule or refresh_includes_jobs:
+                    next_jobs_refresh = now + settings.jobs_refresh_seconds
+                if refresh_includes_history:
+                    next_history_refresh = (
+                        now + settings.jobs_history_refresh_seconds
+                    )
 
             if not refresh_futures:
                 filesystem_due = now >= next_filesystem_refresh
                 login_due = now >= next_login_refresh
                 node_due = now >= next_node_refresh
+                jobs_due = now >= next_jobs_refresh
+                history_due = now >= next_history_refresh
                 forecast_due = now >= next_forecast_refresh
-                if filesystem_due or login_due or node_due or forecast_due:
+                if (
+                    filesystem_due
+                    or login_due
+                    or node_due
+                    or jobs_due
+                    or history_due
+                    or forecast_due
+                ):
                     refresh_includes_filesystems = filesystem_due
                     refresh_checks_login_nodes = login_due
                     refresh_includes_schedule = forecast_due
+                    refresh_includes_jobs = jobs_due
+                    refresh_includes_history = history_due
                     preferred_hosts = {
                         cluster.name: cluster.host for cluster in clusters
                     }
@@ -312,6 +368,8 @@ def dashboard(
                         refresh_includes_filesystems,
                         refresh_checks_login_nodes,
                         refresh_includes_schedule,
+                        refresh_includes_jobs,
+                        refresh_includes_history,
                         preferred_hosts,
                     )
                     refresh_generation = config_generation
@@ -327,6 +385,14 @@ def dashboard(
             )
             login_age_seconds = (
                 None if last_login_refresh is None else int(now - last_login_refresh)
+            )
+            jobs_age_seconds = (
+                None if last_jobs_refresh is None else int(now - last_jobs_refresh)
+            )
+            history_age_seconds = (
+                None
+                if last_history_refresh is None
+                else int(now - last_history_refresh)
             )
             forecast_age_seconds = (
                 None
@@ -555,6 +621,123 @@ def dashboard(
                     fixed_legend_x,
                     styles,
                 )
+            elif active_view == "jobs":
+                scope_key = (
+                    "ALL"
+                    if jobs_cluster_index == 0
+                    else clusters[jobs_cluster_index - 1].name
+                )
+                selected_job_index = jobs_job_indices.get(scope_key, 0)
+                (
+                    headers,
+                    body,
+                    details,
+                    table_width,
+                    selected_body_index,
+                    selected_job_index,
+                ) = jobs_table(
+                    clusters,
+                    jobs_cluster_index,
+                    selected_job_index,
+                )
+                jobs_job_indices[scope_key] = selected_job_index
+                legend = jobs_legend_lines(
+                    age_seconds=jobs_age_seconds,
+                    refreshing=(
+                        bool(refresh_futures)
+                        and (refresh_includes_jobs or refresh_includes_schedule)
+                    ),
+                    refresh_seconds=(runtime_config.settings.jobs_refresh_seconds),
+                    history_age_seconds=history_age_seconds,
+                    history_refreshing=(
+                        bool(refresh_futures) and refresh_includes_history
+                    ),
+                    history_refresh_seconds=(
+                        runtime_config.settings.jobs_history_refresh_seconds
+                    ),
+                )
+                header_height = len(headers)
+                available_below_header = max(1, viewport_height - header_height)
+                detail_height = min(
+                    len(details),
+                    max(0, available_below_header - 1),
+                )
+                body_height = max(1, available_below_header - detail_height)
+                max_vertical = max(0, len(body) - body_height)
+                vertical_offset = min(
+                    max(0, vertical_offsets[active_view]), max_vertical
+                )
+                if jobs_selection_changed:
+                    if selected_body_index < vertical_offset:
+                        vertical_offset = selected_body_index
+                    elif selected_body_index >= vertical_offset + body_height:
+                        vertical_offset = selected_body_index - body_height + 1
+                    jobs_selection_changed = False
+                vertical_offsets[active_view] = vertical_offset
+                page_height = body_height
+                display_headers, render_vertical_offset = sticky_jobs_headers(
+                    headers,
+                    body,
+                    vertical_offset,
+                )
+
+                max_horizontal = max(0, table_width - content_width)
+                horizontal_offsets[active_view] = min(
+                    max(0, horizontal_offsets[active_view]), max_horizontal
+                )
+                horizontal_offset = horizontal_offsets[active_view]
+
+                for row, header_line in enumerate(display_headers):
+                    y = content_y + row
+                    if y >= screen_height:
+                        break
+                    draw_spans(
+                        screen,
+                        y,
+                        0,
+                        header_line,
+                        horizontal_offset,
+                        content_width,
+                        styles,
+                    )
+                for viewport_row in range(body_height):
+                    body_index = render_vertical_offset + viewport_row
+                    y = content_y + header_height + viewport_row
+                    if y >= screen_height or body_index >= len(body):
+                        break
+                    draw_spans(
+                        screen,
+                        y,
+                        0,
+                        body[body_index],
+                        horizontal_offset,
+                        content_width,
+                        styles,
+                    )
+                detail_y = content_y + header_height + body_height
+                for detail_row in details[:detail_height]:
+                    if detail_y >= screen_height:
+                        break
+                    draw_spans(
+                        screen,
+                        detail_y,
+                        0,
+                        detail_row,
+                        horizontal_offset,
+                        content_width,
+                        styles,
+                    )
+                    detail_y += 1
+                draw_fixed_legend(
+                    screen,
+                    legend,
+                    content_y,
+                    screen_height,
+                    screen_width,
+                    fixed_divider_x,
+                    fixed_legend_x,
+                    styles,
+                )
             elif active_view == "forecast":
                 resolution_minutes = FORECAST_RESOLUTIONS[forecast_resolution_index]
                 node_label_width = forecast_node_label_width(
@@ -732,6 +915,49 @@ def dashboard(
             if key == 9 or (backtab_key is not None and key == backtab_key):
                 view_index = VIEWS.index(active_view)
                 active_view = VIEWS[(view_index + 1) % len(VIEWS)]
+                if active_view == "jobs":
+                    jobs_selection_changed = True
+            elif active_view == "jobs" and key in (ord("["), ord("{")):
+                jobs_cluster_index = (jobs_cluster_index - 1) % (len(clusters) + 1)
+                vertical_offsets[active_view] = 0
+                horizontal_offsets[active_view] = 0
+                jobs_selection_changed = True
+            elif active_view == "jobs" and key in (ord("]"), ord("}")):
+                jobs_cluster_index = (jobs_cluster_index + 1) % (len(clusters) + 1)
+                vertical_offsets[active_view] = 0
+                horizontal_offsets[active_view] = 0
+                jobs_selection_changed = True
+            elif active_view == "jobs" and ord("0") <= key <= ord("0") + min(
+                9, len(clusters)
+            ):
+                selected_index = key - ord("0")
+                if selected_index != jobs_cluster_index:
+                    jobs_cluster_index = selected_index
+                    vertical_offsets[active_view] = 0
+                    horizontal_offsets[active_view] = 0
+                    jobs_selection_changed = True
+            elif active_view == "jobs" and key == curses.KEY_UP:
+                scope_key = (
+                    "ALL"
+                    if jobs_cluster_index == 0
+                    else clusters[jobs_cluster_index - 1].name
+                )
+                selected_job = jobs_job_indices.get(scope_key, 0)
+                if selected_job > 0:
+                    jobs_job_indices[scope_key] = selected_job - 1
+                    jobs_selection_changed = True
+            elif active_view == "jobs" and key == curses.KEY_DOWN:
+                scope_key = (
+                    "ALL"
+                    if jobs_cluster_index == 0
+                    else clusters[jobs_cluster_index - 1].name
+                )
+                selected_job = jobs_job_indices.get(scope_key, 0)
+                if selected_job + 1 < len(
+                    jobs_for_scope(clusters, jobs_cluster_index)
+                ):
+                    jobs_job_indices[scope_key] = selected_job + 1
+                    jobs_selection_changed = True
             elif active_view == "forecast" and key in (ord("["), ord("{")):
                 forecast_cluster_index = (forecast_cluster_index - 1) % len(clusters)
                 horizontal_offsets[active_view] = 0
@@ -932,13 +1158,20 @@ def dashboard(
                         forecast_cluster_index,
                         len(clusters) - 1,
                     )
+                    jobs_cluster_index = min(jobs_cluster_index, len(clusters))
+                    jobs_job_indices.clear()
+                    jobs_selection_changed = True
                     last_node_refresh = None
                     last_filesystem_refresh = None
                     last_login_refresh = None
+                    last_jobs_refresh = None
+                    last_history_refresh = None
                     last_forecast_refresh = None
                     next_node_refresh = 0.0
                     next_filesystem_refresh = 0.0
                     next_login_refresh = 0.0
+                    next_jobs_refresh = 0.0
+                    next_history_refresh = 0.0
                     next_forecast_refresh = 0.0
                     for view in VIEWS:
                         if view != "config":
@@ -965,13 +1198,20 @@ def dashboard(
                         forecast_cluster_index,
                         len(clusters) - 1,
                     )
+                    jobs_cluster_index = min(jobs_cluster_index, len(clusters))
+                    jobs_job_indices.clear()
+                    jobs_selection_changed = True
                     last_node_refresh = None
                     last_filesystem_refresh = None
                     last_login_refresh = None
+                    last_jobs_refresh = None
+                    last_history_refresh = None
                     last_forecast_refresh = None
                     next_node_refresh = 0.0
                     next_filesystem_refresh = 0.0
                     next_login_refresh = 0.0
+                    next_jobs_refresh = 0.0
+                    next_history_refresh = 0.0
                     next_forecast_refresh = 0.0
                 except (OSError, ValueError) as error:
                     config_message = f"Reload failed: {error}"
@@ -1001,6 +1241,12 @@ def dashboard(
                 refresh_includes_schedule = (
                     active_view == "forecast" or now >= next_forecast_refresh
                 )
+                refresh_includes_jobs = (
+                    active_view == "jobs" or now >= next_jobs_refresh
+                )
+                refresh_includes_history = (
+                    active_view == "jobs" or now >= next_history_refresh
+                )
                 preferred_hosts = {cluster.name: cluster.host for cluster in clusters}
                 for cluster in clusters:
                     cluster.loading = True
@@ -1011,6 +1257,8 @@ def dashboard(
                     refresh_includes_filesystems,
                     refresh_checks_login_nodes,
                     refresh_includes_schedule,
+                    refresh_includes_jobs,
+                    refresh_includes_history,
                     preferred_hosts,
                 )
                 refresh_generation = config_generation

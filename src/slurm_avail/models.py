@@ -19,6 +19,7 @@ class Node:
     cpu_total: int
     mem_alloc: int
     mem_total: int
+    gpu_type: str = ""
 
     @property
     def cpu_free(self) -> int:
@@ -53,6 +54,7 @@ class ReservationInterval:
     start: float
     end: float
     nodes: tuple[str, ...]
+    mine: bool = False
 
 
 @dataclass
@@ -62,6 +64,93 @@ class RunningInterval:
     nodes: tuple[str, ...]
     gpu_per_node: int
     cpu_per_node: int
+    mem_per_node: int = 0
+    mine: bool = False
+
+
+@dataclass
+class PriorityFactors:
+    """Weighted priority contributions reported by ``sprio``."""
+
+    total: int = 0
+    site: int = 0
+    age: int = 0
+    association: int = 0
+    fairshare: int = 0
+    job_size: int = 0
+    partition: int = 0
+    qos: int = 0
+    nice: int = 0
+    tres: str = ""
+
+
+@dataclass
+class UserJob:
+    job_id: str
+    partition: str
+    name: str
+    state: str
+    reason: str
+    priority: str
+    start: float | None
+    end: float | None
+    scheduled_nodes: tuple[str, ...]
+    time_limit: str
+    node_count: int
+    cpu_count: int
+    memory: str
+    tres_per_node: str
+    allocated_tres: str
+    account: str
+    qos: str
+    submit: float | None = None
+    elapsed: str = ""
+    exit_code: str = ""
+    historical: bool = False
+    priority_factors: PriorityFactors | None = None
+
+    @property
+    def is_running(self) -> bool:
+        return self.state.upper() in ("R", "RUNNING")
+
+    @property
+    def placement(self) -> str:
+        if self.historical:
+            return "past"
+        if self.is_running:
+            return "running"
+        if self.start is not None and self.scheduled_nodes:
+            return "planned"
+        if self.start is not None:
+            return "estimate"
+        return "none"
+
+
+@dataclass
+class FairshareAssociation:
+    account: str
+    user: str
+    raw_shares: float | None
+    normalized_shares: float | None
+    raw_usage: float | None
+    normalized_usage: float | None
+    effective_usage: float | None
+    fairshare: float | None
+    level_fairshare: float | None
+
+
+@dataclass
+class SchedulerData:
+    reservations: list[ReservationInterval] = field(default_factory=list)
+    running_jobs: list[RunningInterval] = field(default_factory=list)
+    jobs: list[UserJob] = field(default_factory=list)
+    past_jobs: list[UserJob] = field(default_factory=list)
+    fairshare: list[FairshareAssociation] = field(default_factory=list)
+    priority_config: dict[str, str] = field(default_factory=dict)
+    jobs_error: str | None = None
+    history_error: str | None = None
+    priority_error: str | None = None
+    fairshare_error: str | None = None
 
 
 @dataclass
@@ -86,6 +175,14 @@ class Cluster:
     login_nodes: list[LoginNode] = field(default_factory=list)
     reservations: list[ReservationInterval] = field(default_factory=list)
     running_jobs: list[RunningInterval] = field(default_factory=list)
+    jobs: list[UserJob] = field(default_factory=list)
+    past_jobs: list[UserJob] = field(default_factory=list)
+    fairshare: list[FairshareAssociation] = field(default_factory=list)
+    priority_config: dict[str, str] = field(default_factory=dict)
+    jobs_error: str | None = None
+    history_error: str | None = None
+    priority_error: str | None = None
+    fairshare_error: str | None = None
     loading: bool = False
     error: str | None = None
 

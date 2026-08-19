@@ -73,15 +73,32 @@ def capacity_bar(
     width: int,
     free_style: str,
     busy_style: str = "busy",
+    highlighted_busy: int = 0,
+    highlight_style: str = "mine",
 ) -> Line:
     free_slots = rounded_free_slots(free, total, width)
+    if highlighted_busy > 0 and free > 0 and free_slots == width:
+        free_slots -= 1
     busy_slots = width - free_slots
+    highlight_slots = min(
+        busy_slots,
+        rounded_free_slots(highlighted_busy, total, width),
+    )
+    other_busy_slots = busy_slots - highlight_slots
     return line(
         (f"{label} [", free_style),
         ("█" * free_slots, free_style),
-        ("░" * busy_slots, busy_style),
+        ("░" * other_busy_slots, busy_style),
+        ("█" * highlight_slots, highlight_style),
         (f"] {stats}", "normal"),
     )
+
+
+def ownership_legend_lines() -> list[Line]:
+    return [
+        line(("U ■", "mine"), (" your usage", "normal")),
+        line(("R ■", "mine_reserved"), (" your reservation", "normal")),
+    ]
 
 
 def free_meter(free: int, total: int) -> str:
@@ -103,6 +120,11 @@ def tab_line(active_view: str, context: str) -> Line:
         (
             "[LOGIN NODES]",
             "title" if active_view == "logins" else "normal",
+        ),
+        ("  ", "normal"),
+        (
+            "[JOBS]",
+            "title" if active_view == "jobs" else "normal",
         ),
         ("  ", "normal"),
         (

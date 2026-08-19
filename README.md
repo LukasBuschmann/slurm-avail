@@ -34,6 +34,18 @@ configured on each cluster.
 **Login Nodes** shows which SSH endpoints are reachable, which endpoint is
 currently supplying data, and whether automatic failover is available.
 
+**Jobs** combines the current user's live queue with recent accounting history.
+Its default All scope lists jobs from every configured cluster; numbered
+cluster scopes filter the same table. Running jobs show their actual nodes and
+start/end times, pending jobs show Slurm's wait reason and placement estimate,
+and finished jobs appear in a separate history table with result-aware colors.
+A fixed inspector at the bottom follows the selected row and shows its full
+timing and result information. For pending jobs it also exposes weighted
+`sprio` factors and account and user fair-share data from `sshare`. Scheduler
+estimates are presented as estimates, not predictions made by the dashboard.
+The history window and its refresh interval are configurable; they default to
+seven days and one minute.
+
 **Forecast** presents a per-node timeline of exact Slurm reservations and the
 remaining time limits of currently running jobs. The timeline can be zoomed
 and navigated from short operational windows up to a year. It deliberately
@@ -78,7 +90,7 @@ On first launch, the Config view opens automatically and creates:
 
 Select the initial local cluster and press `Enter` to edit it, or press `a` to
 add an SSH cluster. Press `s` to save and apply, then use `Tab` to switch
-between Nodes, Filesystems, Login Nodes, Forecast, and Config.
+between Nodes, Filesystems, Login Nodes, Jobs, Forecast, and Config.
 
 You can return directly to configuration with:
 
@@ -105,6 +117,9 @@ version = 1
 node_refresh_seconds = 10
 filesystem_refresh_seconds = 60
 login_refresh_seconds = 60
+jobs_refresh_seconds = 10
+jobs_history_refresh_seconds = 60
+jobs_history_days = 7
 forecast_refresh_seconds = 300
 failed_retry_seconds = 10
 ssh_connect_timeout_seconds = 8
@@ -185,7 +200,7 @@ slurm-avail --config /path/to/config.toml
 | `Home` / `End` | Jump to top or bottom |
 | `r` | Refresh now |
 | `+` / `-` | Change forecast resolution |
-| `[` / `]` | Change forecast cluster |
+| `[` / `]` | Change Jobs scope or Forecast cluster |
 | `q` | Quit |
 
 The Config view shows its editing controls in the legend. In particular, use
@@ -205,7 +220,12 @@ On each configured cluster endpoint:
 - a working Slurm installation connected to the cluster controller
 - Slurm's `scontrol` and `squeue` commands available on `PATH` or through the
   configured `slurm_bin_path`
-- `/bin/sh`, `id`, and `date`
+- Slurm's `sprio` and `sshare` commands for Jobs priority and fair-share
+  details (the Jobs view degrades gracefully when they are unavailable)
+- Slurm's `sacct` command and accounting data for recent Jobs history (live
+  jobs remain available if accounting is disabled or unavailable)
+- `/bin/sh` and standard POSIX utilities including `id`, `date`, `awk`,
+  `sort`, `sed`, and `grep`
 - `df` and `tail` for filesystem monitoring (`timeout` is used when present)
 
 SSH authentication must already work non-interactively, normally through an
@@ -218,6 +238,7 @@ private keys.
 slurm-avail --help
 slurm-avail --version
 slurm-avail --once
+slurm-avail --view jobs
 slurm-avail --view forecast --cluster 2
 ```
 

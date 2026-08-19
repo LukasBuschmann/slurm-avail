@@ -9,7 +9,7 @@ from pathlib import Path
 
 from .config import SETTING_FIELDS, AppConfig, ClusterConfig
 from .constants import LEGEND_WIDTH, Line
-from .text import line, plain
+from .text import line, ownership_legend_lines, plain
 
 
 def setting_value_text(key: str, value: int) -> str:
@@ -74,7 +74,10 @@ def config_table(
         body.extend(
             [
                 plain(f"      mode / focus   {cluster.mode} / {cluster.focus}"),
-                plain(f"      user           {user}"),
+                line(
+                    ("      user           ", "normal"),
+                    (user, "mine" if cluster.user else "busy"),
+                ),
                 plain(f"      endpoints      {endpoints}"),
                 plain(f"      Slurm bin      {slurm_path}"),
                 plain(f"      filesystems    {filesystems}"),
@@ -106,6 +109,9 @@ def config_legend_lines(dirty: bool) -> list[Line]:
         plain("Esc cancels"),
         plain("Ctrl-U clears value"),
         plain("comma separates lists"),
+        plain(""),
+        line(("CURRENT USER", "title")),
+        *ownership_legend_lines(),
         plain(""),
         line(("STATE", "title")),
         line(

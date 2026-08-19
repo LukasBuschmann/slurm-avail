@@ -11,7 +11,7 @@ import shlex
 import subprocess
 import time
 from collections.abc import Iterable
-from datetime import datetime
+from datetime import datetime, timedelta
 
 from .config import (
     AppConfig,
@@ -21,11 +21,15 @@ from .config import (
 )
 from .models import (
     Cluster,
+    FairshareAssociation,
     Filesystem,
     LoginNode,
     Node,
+    PriorityFactors,
     ReservationInterval,
     RunningInterval,
+    SchedulerData,
+    UserJob,
 )
 
 UNAVAILABLE_RE = re.compile(
@@ -36,9 +40,96 @@ UNAVAILABLE_RE = re.compile(
 RESERVED_RE = re.compile(r"RESERV", re.IGNORECASE)
 DRAINED_RE = re.compile(r"DRAIN", re.IGNORECASE)
 SQUEUE_FORMAT = (
-    "JobID:0|,EndTime:0|,NodeList:0|,tres-per-node:0|,"
+    "JobID:0|,UserName:0|,EndTime:0|,NodeList:0|,tres-per-node:0|,"
     "tres-alloc:0|,NumCPUs:0|,NumNodes:0"
 )
+JOBS_FORMAT = (
+    "JobID:0|,Partition:0|,Name:0|,State:0|,Reason:0|,Priority:0|,"
+    "SubmitTime:0|,StartTime:0|,EndTime:0|,NodeList:0|,SchedNodes:0|,"
+    "TimeLimit:0|,NumNodes:0|,NumCPUs:0|,MinMemory:0|,tres-per-node:0|,"
+    "tres-alloc:0|,Account:0|,QOS:0"
+)
+JOBS_FALLBACK_FORMAT = (
+    "%i|%P|%j|%T|%r|%Q|%V|%S|%e|%N|%n|%l|%D|%C|%m|%b||%a|%q"
+)
+HISTORY_FORMAT = (
+    "JobIDRaw,JobName,Partition,State,Submit,Start,End,Elapsed,Timelimit,"
+    "NNodes,NCPUS,ReqMem,ReqTRES,AllocTRES,Account,QOS,NodeList,ExitCode"
+)
+JOB_DATA_COMMAND = rf"""
+printf '__USER_JOBS__\n'
+dashboard_user=$(id -un)
+dashboard_jobs_error=
+if ! dashboard_jobs=$(
+    squeue -u "$dashboard_user" -t PD,R -h -O '{JOBS_FORMAT}' 2>&1
+); then
+    dashboard_jobs_error=$(printf '%s\n' "$dashboard_jobs" | sed -n '1p')
+    dashboard_jobs=
+elif [ -n "$dashboard_jobs" ] && ! printf '%s\n' "$dashboard_jobs" | grep -q '|'; then
+    if ! dashboard_jobs=$(
+        squeue -u "$dashboard_user" -t PD,R -h -o '{JOBS_FALLBACK_FORMAT}' 2>&1
+    ); then
+        dashboard_jobs_error=$(printf '%s\n' "$dashboard_jobs" | sed -n '1p')
+        dashboard_jobs=
+    fi
+fi
+if [ -z "$dashboard_jobs_error" ]; then
+    printf '%s\n' "$dashboard_jobs"
+else
+    printf '__ERROR__|%s\n' "$dashboard_jobs_error"
+fi
+printf '__PRIORITIES__\n'
+if [ -n "$dashboard_jobs" ]; then
+    if priority_rows=$(
+        sprio -u "$dashboard_user" -h \
+            -o '%i|%Y|%S|%A|%B|%F|%J|%P|%Q|%N|%T' 2>&1
+    ); then
+        printf '%s\n' "$priority_rows"
+    else
+        printf '__ERROR__|%s\n' "$(printf '%s\n' "$priority_rows" | sed -n '1p')"
+    fi
+fi
+printf '__FAIRSHARE__\n'
+if [ -n "$dashboard_jobs" ]; then
+    fairshare_ok=0
+    fairshare_error=
+    dashboard_accounts=$(
+        printf '%s\n' "$dashboard_jobs" |
+            awk -F'|' 'NF >= 18 && $18 != "" {{ print $18 }}' |
+            sort -u
+    )
+    fairshare_fields='Account,User,RawShares,NormShares,RawUsage,'\
+'NormUsage,EffectvUsage,FairShare,LevelFS'
+    for dashboard_account in $dashboard_accounts; do
+        [ -n "$dashboard_account" ] || continue
+        if fairshare_rows=$(
+            sshare -A "$dashboard_account" -u "$dashboard_user" \
+                -l -h -P -o "$fairshare_fields" 2>&1
+        ); then
+            printf '%s\n' "$fairshare_rows"
+            fairshare_ok=1
+        else
+            fairshare_error=$(printf '%s\n' "$fairshare_rows" | sed -n '1p')
+        fi
+    done
+    if [ "$fairshare_ok" -eq 0 ] && [ -n "$fairshare_error" ]; then
+        printf '__ERROR__|%s\n' "$fairshare_error"
+    fi
+fi
+printf '__PRIORITY_CONFIG__\n'
+if priority_config=$(scontrol show config 2>&1); then
+    priority_pattern='^[[:space:]]*(PriorityType|PriorityWeightAge|'
+    priority_pattern="${{priority_pattern}}PriorityWeightAssoc|PriorityWeightFairshare|"
+    priority_pattern="${{priority_pattern}}PriorityWeightJobSize|PriorityWeightPartition|"
+    priority_pattern="${{priority_pattern}}PriorityWeightQOS|PriorityWeightTRES|"
+    priority_pattern="${{priority_pattern}}PriorityDecayHalfLife|PriorityCalcPeriod|"
+    priority_pattern="${{priority_pattern}}PriorityFlags|PriorityUsageResetPeriod)"
+    priority_pattern="${{priority_pattern}}[[:space:]]*="
+    printf '%s\n' "$priority_config" | grep -E "$priority_pattern" || true
+else
+    printf '__ERROR__|%s\n' "$(printf '%s\n' "$priority_config" | sed -n '1p')"
+fi
+"""
 SCHEDULE_COMMAND = rf"""
 printf '__SCHEDULE__\n'
 printf '__TIMEZONE__|'
@@ -47,6 +138,35 @@ printf '__RESERVATIONS__\n'
 scontrol show reservations -o
 printf '__RUNNING_JOBS__\n'
 squeue -a -t R -h -O '{SQUEUE_FORMAT}'
+{JOB_DATA_COMMAND}
+"""
+JOBS_COMMAND = f"""
+printf '__JOBS__\n'
+printf '__TIMEZONE__|'
+date +%z
+{JOB_DATA_COMMAND}
+"""
+
+
+def history_command(
+    history_days: int,
+    reference_time: datetime | None = None,
+) -> str:
+    reference_time = reference_time or datetime.now().astimezone()
+    start_date = (reference_time - timedelta(days=history_days)).strftime("%Y-%m-%d")
+    return rf"""
+printf '__HISTORY__\n'
+printf '__TIMEZONE__|'
+date +%z
+dashboard_user=$(id -un)
+if history_rows=$(
+    sacct -u "$dashboard_user" -X -n -P -S {start_date} \
+        -o '{HISTORY_FORMAT}' 2>&1
+); then
+    printf '%s\n' "$history_rows"
+else
+    printf '__ERROR__|%s\n' "$(printf '%s\n' "$history_rows" | sed -n '1p')"
+fi
 """
 
 
@@ -55,6 +175,15 @@ def parse_int(value: str | None) -> int:
         return int(value or 0)
     except ValueError:
         return 0
+
+
+def parse_float(value: str | None) -> float | None:
+    if value is None or value.strip() in ("", "N/A", "None", "(null)"):
+        return None
+    try:
+        return float(value)
+    except ValueError:
+        return None
 
 
 def tres_value(value: str, key: str) -> int:
@@ -135,9 +264,13 @@ def parse_nodes(
 
         gpu_total = 0
         gpu_alloc = 0
+        gpu_type = ""
         if "gpu:" in gres:
             gpu_total = tres_value(cfg_tres, "gres/gpu")
             gpu_alloc = min(gpu_total, tres_value(alloc_tres, "gres/gpu"))
+            gpu_match = re.search(r"(?:^|,)gpu:([^:,(]+):\d+", gres)
+            if gpu_match:
+                gpu_type = gpu_match.group(1)
 
         status = node_status(
             state,
@@ -166,6 +299,7 @@ def parse_nodes(
                 cpu_total=cpu_total,
                 mem_alloc=mem_alloc,
                 mem_total=mem_total,
+                gpu_type=gpu_type,
             )
         )
 
@@ -255,7 +389,7 @@ def expand_hostlist(value: str) -> tuple[str, ...]:
 
 
 def parse_slurm_time(value: str, utc_offset: str) -> float | None:
-    if value in ("", "N/A", "Unknown", "None"):
+    if value in ("", "N/A", "Unknown", "None", "(null)"):
         return None
     try:
         return datetime.strptime(
@@ -292,18 +426,61 @@ def parse_gpu_count(tres: str) -> int:
     return generic_count if generic_count is not None else typed_count
 
 
+def parse_memory_mb(tres: str) -> int:
+    """Return Slurm's allocated-memory TRES in MiB."""
+    factors = {
+        "": 1,
+        "K": 1 / 1024,
+        "M": 1,
+        "G": 1024,
+        "T": 1024**2,
+        "P": 1024**3,
+    }
+    for raw_item in tres.split(","):
+        match = re.fullmatch(r"\s*mem=(\d+(?:\.\d+)?)([KMGTP]?)\s*", raw_item)
+        if match:
+            amount, unit = match.groups()
+            return math.ceil(float(amount) * factors[unit])
+    return 0
+
+
+def reservation_includes_user(users: str, current_user: str) -> bool:
+    """Identify explicit positive membership without treating ALL as personal."""
+    if not current_user:
+        return False
+    return any(
+        item.lstrip("+") == current_user and not item.startswith("-")
+        for item in users.split(",")
+    )
+
+
 def parse_schedule(
     output: str,
-) -> tuple[list[ReservationInterval], list[RunningInterval]]:
+    current_user: str,
+) -> SchedulerData:
     timezone_line, reservation_marker, rest = output.partition("\n__RESERVATIONS__\n")
     if not reservation_marker or not timezone_line.startswith("__TIMEZONE__|"):
         raise RuntimeError("remote schedule metadata marker missing")
     utc_offset = timezone_line.removeprefix("__TIMEZONE__|").strip()
     if not re.fullmatch(r"[+-]\d{4}", utc_offset):
         raise RuntimeError("remote timezone missing")
-    reservation_output, job_marker, job_output = rest.partition("__RUNNING_JOBS__\n")
-    if not job_marker:
+    reservation_output, running_marker, rest = rest.partition("__RUNNING_JOBS__\n")
+    if not running_marker:
         raise RuntimeError("remote running-job marker missing")
+    running_output, jobs_marker, rest = rest.partition("__USER_JOBS__\n")
+    if not jobs_marker:
+        raise RuntimeError("remote user-job marker missing")
+    user_jobs_output, priority_marker, rest = rest.partition("__PRIORITIES__\n")
+    if not priority_marker:
+        raise RuntimeError("remote priority marker missing")
+    priority_output, fairshare_marker, rest = rest.partition("__FAIRSHARE__\n")
+    if not fairshare_marker:
+        raise RuntimeError("remote fair-share marker missing")
+    fairshare_output, config_marker, config_output = rest.partition(
+        "__PRIORITY_CONFIG__\n"
+    )
+    if not config_marker:
+        raise RuntimeError("remote priority-config marker missing")
 
     reservations: list[ReservationInterval] = []
     for raw_line in reservation_output.splitlines():
@@ -324,16 +501,18 @@ def parse_schedule(
                 start=start,
                 end=end,
                 nodes=expand_hostlist(node_list),
+                mine=reservation_includes_user(values.get("Users", ""), current_user),
             )
         )
 
     running_jobs: list[RunningInterval] = []
-    for raw_line in job_output.splitlines():
+    for raw_line in running_output.splitlines():
         fields = raw_line.split("|")
-        if len(fields) != 7:
+        if len(fields) != 8:
             continue
         (
             job_id,
+            job_user,
             end_text,
             node_list,
             per_node_tres,
@@ -356,9 +535,247 @@ def parse_schedule(
                 nodes=nodes,
                 gpu_per_node=gpu_per_node,
                 cpu_per_node=math.ceil(parse_int(cpu_text) / node_count),
+                mem_per_node=math.ceil(parse_memory_mb(allocated_tres) / node_count),
+                mine=job_user == current_user,
             )
         )
-    return reservations, running_jobs
+
+    jobs: list[UserJob] = []
+    jobs_error: str | None = None
+    for raw_line in user_jobs_output.splitlines():
+        if raw_line.startswith("__ERROR__|"):
+            jobs_error = raw_line.partition("|")[2] or "squeue unavailable"
+            continue
+        fields = raw_line.split("|")
+        if len(fields) != 19:
+            if raw_line.strip() and jobs_error is None:
+                jobs_error = (
+                    "unrecognized squeue field layout "
+                    f"({len(fields)} fields, expected 19)"
+                )
+            continue
+        (
+            job_id,
+            partition,
+            name,
+            state,
+            reason,
+            priority,
+            submit_text,
+            start_text,
+            end_text,
+            node_list,
+            scheduled_nodes,
+            time_limit,
+            node_count,
+            cpu_count,
+            memory,
+            tres_per_node,
+            allocated_tres,
+            account,
+            qos,
+        ) = fields
+        if not job_id:
+            continue
+        is_running = state.upper() in ("R", "RUNNING")
+        node_text = node_list if is_running else scheduled_nodes
+        jobs.append(
+            UserJob(
+                job_id=job_id,
+                partition=partition,
+                name=name,
+                state=state,
+                reason=reason,
+                priority=priority,
+                start=parse_slurm_time(start_text, utc_offset),
+                end=parse_slurm_time(end_text, utc_offset),
+                scheduled_nodes=(
+                    ()
+                    if node_text in ("", "N/A", "None", "(null)")
+                    or (node_text.startswith("(") and node_text.endswith(")"))
+                    else expand_hostlist(node_text)
+                ),
+                time_limit=time_limit,
+                node_count=parse_int(node_count),
+                cpu_count=parse_int(cpu_count),
+                memory=memory,
+                tres_per_node=tres_per_node,
+                allocated_tres=allocated_tres,
+                account=account.strip(),
+                qos=qos,
+                submit=parse_slurm_time(submit_text, utc_offset),
+            )
+        )
+
+    priority_error: str | None = None
+    priority_by_job: dict[str, PriorityFactors] = {}
+    for raw_line in priority_output.splitlines():
+        if raw_line.startswith("__ERROR__|"):
+            priority_error = raw_line.partition("|")[2] or "sprio unavailable"
+            continue
+        fields = raw_line.split("|", 10)
+        if len(fields) != 11:
+            continue
+        job_id = fields[0].strip()
+        if not job_id:
+            continue
+        priority_by_job[job_id] = PriorityFactors(
+            total=parse_int(fields[1]),
+            site=parse_int(fields[2]),
+            age=parse_int(fields[3]),
+            association=parse_int(fields[4]),
+            fairshare=parse_int(fields[5]),
+            job_size=parse_int(fields[6]),
+            partition=parse_int(fields[7]),
+            qos=parse_int(fields[8]),
+            nice=parse_int(fields[9]),
+            tres=fields[10].strip(),
+        )
+    jobs.sort(key=lambda job: (not job.is_running, job.job_id))
+    for job in jobs:
+        job.priority_factors = priority_by_job.get(job.job_id)
+
+    job_accounts = {job.account for job in jobs if job.account}
+    fairshare: list[FairshareAssociation] = []
+    fairshare_error: str | None = None
+    seen_associations: set[tuple[str, str]] = set()
+    for raw_line in fairshare_output.splitlines():
+        if raw_line.startswith("__ERROR__|"):
+            fairshare_error = raw_line.partition("|")[2] or "sshare unavailable"
+            continue
+        fields = raw_line.split("|")
+        if len(fields) < 9:
+            continue
+        account = fields[0].strip()
+        user = fields[1].strip()
+        if account not in job_accounts or user not in ("", current_user):
+            continue
+        association_key = (account, user)
+        if association_key in seen_associations:
+            continue
+        seen_associations.add(association_key)
+        fairshare.append(
+            FairshareAssociation(
+                account=account,
+                user=user,
+                raw_shares=parse_float(fields[2]),
+                normalized_shares=parse_float(fields[3]),
+                raw_usage=parse_float(fields[4]),
+                normalized_usage=parse_float(fields[5]),
+                effective_usage=parse_float(fields[6]),
+                fairshare=parse_float(fields[7]),
+                level_fairshare=parse_float(fields[8]),
+            )
+        )
+
+    priority_config: dict[str, str] = {}
+    for raw_line in config_output.splitlines():
+        if raw_line.startswith("__ERROR__|"):
+            if priority_error is None:
+                priority_error = raw_line.partition("|")[2] or "config unavailable"
+            continue
+        key, separator, value = raw_line.partition("=")
+        if separator:
+            priority_config[key.strip()] = value.strip()
+
+    return SchedulerData(
+        reservations=reservations,
+        running_jobs=running_jobs,
+        jobs=jobs,
+        fairshare=fairshare,
+        priority_config=priority_config,
+        jobs_error=jobs_error,
+        priority_error=priority_error,
+        fairshare_error=fairshare_error,
+    )
+
+
+def parse_jobs(output: str, current_user: str) -> SchedulerData:
+    """Parse a jobs-only response using the shared scheduler-data parser."""
+    timezone_line, jobs_marker, rest = output.partition("\n__USER_JOBS__\n")
+    if not jobs_marker or not timezone_line.startswith("__TIMEZONE__|"):
+        raise RuntimeError("remote jobs metadata marker missing")
+    synthetic_schedule = (
+        f"{timezone_line}\n"
+        "__RESERVATIONS__\n"
+        "__RUNNING_JOBS__\n"
+        "__USER_JOBS__\n"
+        f"{rest}"
+    )
+    return parse_schedule(synthetic_schedule, current_user)
+
+
+def parse_history(output: str) -> tuple[list[UserJob], str | None]:
+    timezone_line, separator, history_output = output.partition("\n")
+    if not separator or not timezone_line.startswith("__TIMEZONE__|"):
+        raise RuntimeError("remote history metadata marker missing")
+    utc_offset = timezone_line.removeprefix("__TIMEZONE__|").strip()
+    if not re.fullmatch(r"[+-]\d{4}", utc_offset):
+        raise RuntimeError("remote history timezone missing")
+
+    jobs: list[UserJob] = []
+    history_error: str | None = None
+    for raw_line in history_output.splitlines():
+        if raw_line.startswith("__ERROR__|"):
+            history_error = raw_line.partition("|")[2] or "sacct unavailable"
+            continue
+        fields = raw_line.split("|")
+        if len(fields) != 18:
+            continue
+        (
+            job_id,
+            name,
+            partition,
+            state,
+            submit_text,
+            start_text,
+            end_text,
+            elapsed,
+            time_limit,
+            node_count,
+            cpu_count,
+            memory,
+            requested_tres,
+            allocated_tres,
+            account,
+            qos,
+            node_list,
+            exit_code,
+        ) = fields
+        state_name = state.split(maxsplit=1)[0].rstrip("+").upper()
+        if not job_id or state_name in ("PENDING", "PD", "RUNNING", "R"):
+            continue
+        nodes = (
+            ()
+            if node_list in ("", "None", "None assigned", "Unknown", "(null)")
+            else expand_hostlist(node_list)
+        )
+        jobs.append(
+            UserJob(
+                job_id=job_id,
+                partition=partition,
+                name=name,
+                state=state,
+                reason="",
+                priority="",
+                start=parse_slurm_time(start_text, utc_offset),
+                end=parse_slurm_time(end_text, utc_offset),
+                scheduled_nodes=nodes,
+                time_limit=time_limit,
+                node_count=parse_int(node_count),
+                cpu_count=parse_int(cpu_count),
+                memory=memory,
+                tres_per_node=requested_tres,
+                allocated_tres=allocated_tres,
+                account=account.strip(),
+                qos=qos,
+                submit=parse_slurm_time(submit_text, utc_offset),
+                elapsed=elapsed,
+                exit_code=exit_code,
+                historical=True,
+            )
+        )
+    return jobs, history_error
 
 
 def ssh_error_message(error: BaseException) -> str:
@@ -478,6 +895,8 @@ def data_command(
     settings: DashboardSettings,
     include_filesystems: bool,
     include_schedule: bool,
+    include_jobs: bool,
+    include_history: bool,
 ) -> str:
     parts: list[str] = []
     if cluster_config.slurm_bin_path:
@@ -496,6 +915,10 @@ def data_command(
         )
     if include_schedule:
         parts.append(SCHEDULE_COMMAND)
+    elif include_jobs:
+        parts.append(JOBS_COMMAND)
+    if include_history:
+        parts.append(history_command(settings.jobs_history_days))
     return "".join(parts)
 
 
@@ -526,12 +949,16 @@ def fetch_from_endpoint(
     settings: DashboardSettings,
     include_filesystems: bool,
     include_schedule: bool,
+    include_jobs: bool,
+    include_history: bool,
 ) -> Cluster:
     command = data_command(
         cluster_config,
         settings,
         include_filesystems,
         include_schedule,
+        include_jobs,
+        include_history,
     )
     result = run_endpoint(
         cluster_config,
@@ -542,15 +969,27 @@ def fetch_from_endpoint(
     )
     node_and_user_output = result.stdout
     filesystem_output = ""
-    reservations: list[ReservationInterval] = []
-    running_jobs: list[RunningInterval] = []
+    schedule_output = ""
+    jobs_output = ""
+    history_output = ""
+    if include_history:
+        node_and_user_output, marker, history_output = node_and_user_output.partition(
+            "__HISTORY__\n"
+        )
+        if not marker:
+            raise RuntimeError("remote history marker missing")
     if include_schedule:
-        node_and_user_output, marker, schedule_output = result.stdout.partition(
+        node_and_user_output, marker, schedule_output = node_and_user_output.partition(
             "__SCHEDULE__\n"
         )
         if not marker:
             raise RuntimeError("remote schedule marker missing")
-        reservations, running_jobs = parse_schedule(schedule_output)
+    elif include_jobs:
+        node_and_user_output, marker, jobs_output = node_and_user_output.partition(
+            "__JOBS__\n"
+        )
+        if not marker:
+            raise RuntimeError("remote jobs marker missing")
     if include_filesystems:
         node_and_user_output, marker, filesystem_output = (
             node_and_user_output.partition("__FILESYSTEMS__\n")
@@ -565,6 +1004,15 @@ def fetch_from_endpoint(
     current_user = user_output.removeprefix("__USER__").strip()
     if not current_user:
         raise RuntimeError("remote user missing")
+    scheduler_data = SchedulerData()
+    if include_schedule:
+        scheduler_data = parse_schedule(schedule_output, current_user)
+    elif include_jobs:
+        scheduler_data = parse_jobs(jobs_output, current_user)
+    if include_history:
+        scheduler_data.past_jobs, scheduler_data.history_error = parse_history(
+            history_output
+        )
     nodes = parse_nodes(
         node_output,
         current_user,
@@ -581,8 +1029,16 @@ def fetch_from_endpoint(
         filesystem_paths=tuple(cluster_config.filesystems),
         nodes=nodes,
         filesystems=parse_filesystems(filesystem_output),
-        reservations=reservations,
-        running_jobs=running_jobs,
+        reservations=scheduler_data.reservations,
+        running_jobs=scheduler_data.running_jobs,
+        jobs=scheduler_data.jobs,
+        past_jobs=scheduler_data.past_jobs,
+        fairshare=scheduler_data.fairshare,
+        priority_config=scheduler_data.priority_config,
+        jobs_error=scheduler_data.jobs_error,
+        history_error=scheduler_data.history_error,
+        priority_error=scheduler_data.priority_error,
+        fairshare_error=scheduler_data.fairshare_error,
     )
 
 
@@ -617,6 +1073,8 @@ def fetch_cluster(
     include_filesystems: bool,
     check_login_nodes: bool,
     include_schedule: bool,
+    include_jobs: bool,
+    include_history: bool,
     preferred_host: str | None,
 ) -> Cluster:
     endpoints = (
@@ -642,6 +1100,8 @@ def fetch_cluster(
                     settings,
                     include_filesystems,
                     include_schedule,
+                    include_jobs,
+                    include_history,
                 )
                 login_status[hostname] = LoginNode(
                     hostname=hostname,
@@ -694,6 +1154,8 @@ def fetch_all_clusters(
     include_filesystems: bool = True,
     check_login_nodes: bool = True,
     include_schedule: bool = False,
+    include_jobs: bool = False,
+    include_history: bool = False,
     preferred_hosts: dict[str, str] | None = None,
 ) -> list[Cluster]:
     preferred_hosts = preferred_hosts or {}
@@ -710,6 +1172,8 @@ def fetch_all_clusters(
                 include_filesystems,
                 check_login_nodes,
                 include_schedule,
+                include_jobs,
+                include_history,
                 preferred_hosts.get(cluster_config.name),
             )
             for cluster_config in cluster_configs
@@ -724,6 +1188,8 @@ def submit_cluster_refreshes(
     include_filesystems: bool,
     check_login_nodes: bool,
     include_schedule: bool,
+    include_jobs: bool,
+    include_history: bool,
     preferred_hosts: dict[str, str] | None = None,
 ) -> dict[concurrent.futures.Future[Cluster], str]:
     """Submit independent live requests so one slow cluster cannot block peers."""
@@ -738,6 +1204,8 @@ def submit_cluster_refreshes(
             include_filesystems,
             check_login_nodes,
             include_schedule,
+            include_jobs,
+            include_history,
             preferred_hosts.get(cluster_config.name),
         ): cluster_config.name
         for cluster_config in active_cluster_configs(config_snapshot)
@@ -750,6 +1218,8 @@ def merge_cluster_refresh(
     include_filesystems: bool,
     check_login_nodes: bool,
     include_schedule: bool,
+    include_jobs: bool,
+    include_history: bool,
 ) -> Cluster:
     """Keep data that was intentionally omitted from a partial refresh."""
     refreshed.loading = False
@@ -758,6 +1228,16 @@ def merge_cluster_refresh(
     if not include_schedule:
         refreshed.reservations = previous.reservations
         refreshed.running_jobs = previous.running_jobs
+    if not include_schedule and not include_jobs:
+        refreshed.jobs = previous.jobs
+        refreshed.fairshare = previous.fairshare
+        refreshed.priority_config = previous.priority_config
+        refreshed.jobs_error = previous.jobs_error
+        refreshed.priority_error = previous.priority_error
+        refreshed.fairshare_error = previous.fairshare_error
+    if not include_history:
+        refreshed.past_jobs = previous.past_jobs
+        refreshed.history_error = previous.history_error
     if not check_login_nodes:
         previous_logins = {login.hostname: login for login in previous.login_nodes}
         merged_logins: list[LoginNode] = []

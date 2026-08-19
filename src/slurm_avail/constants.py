@@ -18,11 +18,12 @@ LEGEND_WIDTH = 26
 GAP = 3
 FILESYSTEM_TABLE_MIN_WIDTH = 105
 LOGIN_TABLE_WIDTH = 118
+JOBS_TABLE_WIDTH = 132
 GPU_LEVELS = "▁▂▃▄▅▆▇█"
 FORECAST_LEVELS = GPU_LEVELS
 FORECAST_STATE_WIDTH = 4
 LOADING_FRAMES = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
-VIEWS = ("nodes", "filesystems", "logins", "forecast", "config")
+VIEWS = ("nodes", "filesystems", "logins", "jobs", "forecast", "config")
 
 Span = tuple[str, str]
 Line = list[Span]
