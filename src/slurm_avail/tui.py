@@ -332,9 +332,7 @@ def dashboard(
                 if refresh_includes_schedule or refresh_includes_jobs:
                     next_jobs_refresh = now + settings.jobs_refresh_seconds
                 if refresh_includes_history:
-                    next_history_refresh = (
-                        now + settings.jobs_history_refresh_seconds
-                    )
+                    next_history_refresh = now + settings.jobs_history_refresh_seconds
 
             if not refresh_futures:
                 filesystem_due = now >= next_filesystem_refresh
@@ -953,9 +951,7 @@ def dashboard(
                     else clusters[jobs_cluster_index - 1].name
                 )
                 selected_job = jobs_job_indices.get(scope_key, 0)
-                if selected_job + 1 < len(
-                    jobs_for_scope(clusters, jobs_cluster_index)
-                ):
+                if selected_job + 1 < len(jobs_for_scope(clusters, jobs_cluster_index)):
                     jobs_job_indices[scope_key] = selected_job + 1
                     jobs_selection_changed = True
             elif active_view == "forecast" and key in (ord("["), ord("{")):

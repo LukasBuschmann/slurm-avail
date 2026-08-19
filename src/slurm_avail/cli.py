@@ -95,8 +95,7 @@ def main() -> int:
     parser.add_argument(
         "--cluster",
         help=(
-            "initial Jobs scope or Forecast cluster name/number "
-            "(Jobs defaults to All)"
+            "initial Jobs scope or Forecast cluster name/number (Jobs defaults to All)"
         ),
     )
     parser.add_argument(

@@ -9,7 +9,8 @@ from slurm_avail.models import (
     ReservationInterval,
     RunningInterval,
 )
-from slurm_avail.node_views import cluster_body, cluster_header
+from slurm_avail.node_views import cluster_body, cluster_header, gpu_node_lines
+from slurm_avail.text import visible_length
 
 
 def gpu_node(name: str, *, reserved: bool = False) -> Node:
@@ -76,11 +77,81 @@ def test_node_view_colors_current_users_gpu_allocation_and_reservation() -> None
         ],
     )
 
-    lines = cluster_header(cluster) + cluster_body(cluster, colored=True)
-    styles = [style for row in lines for _text, style in row]
+    header = cluster_header(cluster)
+    body = cluster_body(cluster, colored=True)
+    header_text = "\n".join("".join(text for text, _style in row) for row in header)
+    header_styles = [style for row in header for text, style in row if text]
+    body_styles = [style for row in body for _text, style in row]
 
-    assert "mine" in styles
-    assert "mine_reserved" in styles
+    assert "GPU [" in header_text
+    assert "CPU [" in header_text
+    assert "RAM [" in header_text
+    assert "2/8" in header_text
+    assert "mine" not in header_styles
+    assert "mine_reserved" not in header_styles
+    assert "mine" in body_styles
+    assert "mine_reserved" in body_styles
+
+
+def test_gpu_and_cpu_cluster_node_sections_start_at_same_height() -> None:
+    gpu_cluster = Cluster(
+        name="GPU",
+        host="login",
+        focus="gpu",
+        nodes=[gpu_node("gpu01")],
+    )
+    cpu_cluster = Cluster(
+        name="CPU",
+        host="login",
+        focus="cpu",
+        nodes=[cpu_node("cpu01")],
+    )
+
+    gpu_header = cluster_header(gpu_cluster)
+    cpu_header = cluster_header(cpu_cluster)
+    gpu_nodes_row = next(
+        index
+        for index, row in enumerate(gpu_header)
+        if "".join(text for text, _style in row) == "NODES"
+    )
+    cpu_nodes_row = next(
+        index
+        for index, row in enumerate(cpu_header)
+        if "".join(text for text, _style in row) == "NODES"
+    )
+
+    assert gpu_nodes_row == cpu_nodes_row
+
+
+def test_large_gpu_count_uses_scaled_bar_with_cpu_and_memory_below() -> None:
+    node = gpu_node("g28")
+    node.gpu_total = 28
+    node.gpu_alloc = 2
+    node.gpu_busy = 2
+
+    rows = gpu_node_lines(node, colored=True)
+    row_text = ["".join(text for text, _style in row) for row in rows]
+
+    assert len(rows) == 2
+    assert "G [" in row_text[0]
+    assert "26/28" in row_text[0]
+    assert "░" in row_text[0]
+    assert "C " in row_text[1]
+    assert " M " in row_text[1]
+    assert visible_length(rows[0]) <= 28
+
+
+def test_small_gpu_count_keeps_one_square_per_gpu() -> None:
+    rows = gpu_node_lines(gpu_node("gpu01"), colored=True)
+    row_text = "".join(text for text, _style in rows[0])
+    square_styles = [
+        style for text, style in rows[0] if text and set(text) <= {"■", "□"}
+    ]
+
+    assert len(rows) == 1
+    assert row_text.count("■") == 4
+    assert "G [" in row_text
+    assert square_styles == ["free", "busy"]
 
 
 def test_cpu_and_memory_bars_color_current_users_share() -> None:

@@ -62,8 +62,7 @@ def test_jobs_table_shows_scheduler_placement_and_priority_details() -> None:
         0,
     )
     text = "\n".join(
-        "".join(value for value, _style in row)
-        for row in headers + body + details
+        "".join(value for value, _style in row) for row in headers + body + details
     )
     styles = [style for row in body for _value, style in row]
 
@@ -75,6 +74,8 @@ def test_jobs_table_shows_scheduler_placement_and_priority_details() -> None:
     assert "CPUS" in text
     assert "MEMORY" in text
     assert "GPUS" in text
+    assert "STATUS / REASON" not in text
+    assert "reason Priority" in text
     assert "time limit 08:00:00  nodes 1  CPUs 32" in text
     assert "4×h100" in text
     assert "fair-share" in text
@@ -113,8 +114,7 @@ def test_jobs_table_distinguishes_start_estimate_without_nodes() -> None:
 
     headers, body, details, *_rest = jobs_table([cluster], 0, 0)
     text = "\n".join(
-        "".join(value for value, _style in row)
-        for row in headers + body + details
+        "".join(value for value, _style in row) for row in headers + body + details
     )
 
     assert "ESTIMATE" in text
@@ -173,6 +173,7 @@ def test_jobs_all_scope_combines_running_and_pending_across_clusters() -> None:
     assert "[2 ALPHA]" in text
     assert "RUNNING" in text
     assert "PENDING" in text
+    assert "executing" not in text
 
 
 def test_jobs_table_separates_history_and_keeps_selected_details_separate() -> None:
@@ -222,15 +223,9 @@ def test_jobs_table_separates_history_and_keeps_selected_details_separate() -> N
         past_jobs=[past],
     )
 
-    headers, body, details, _width, selected_body, _job = jobs_table(
-        [cluster], 0, 0
-    )
-    body_text = "\n".join(
-        "".join(value for value, _style in row) for row in body
-    )
-    detail_text = "\n".join(
-        "".join(value for value, _style in row) for row in details
-    )
+    headers, body, details, _width, selected_body, _job = jobs_table([cluster], 0, 0)
+    body_text = "\n".join("".join(value for value, _style in row) for row in body)
+    detail_text = "\n".join("".join(value for value, _style in row) for row in details)
 
     assert "COMPLETED" in body_text
     assert "RUNNING + PENDING" in "\n".join(

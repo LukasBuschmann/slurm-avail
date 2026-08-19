@@ -20,7 +20,6 @@ NODES_WIDTH = 6
 CPUS_WIDTH = 6
 MEMORY_WIDTH = 9
 GPUS_WIDTH = 14
-REASON_WIDTH = 14
 PRIORITY_WIDTH = 9
 START_WIDTH = 15
 PLACEMENT_WIDTH = 11
@@ -178,12 +177,7 @@ def jobs_for_scope(
         entries,
         key=lambda entry: (
             2 if entry[1].historical else (0 if entry[1].is_running else 1),
-            -(
-                entry[1].end
-                or entry[1].start
-                or entry[1].submit
-                or 0
-            )
+            -(entry[1].end or entry[1].start or entry[1].submit or 0)
             if entry[1].historical
             else 0,
             entry[0].name.casefold(),
@@ -200,12 +194,9 @@ def compact_job_time(value: float | None) -> str:
 
 def live_job_row(cluster: Cluster, job: UserJob, selected: bool) -> Line:
     time_limit, nodes, cpus, memory, gpus = resource_values(cluster, job)
-    start = (
-        compact_job_time(job.start)
-    )
+    start = compact_job_time(job.start)
     placement, placement_style = placement_label(job)
     state = job.state.split(maxsplit=1)[0].rstrip("+")
-    status = "executing" if job.is_running else job.reason
     values = (
         clipped_cell(cluster.name, CLUSTER_WIDTH),
         clipped_cell(job.job_id, JOB_WIDTH),
@@ -216,7 +207,6 @@ def live_job_row(cluster: Cluster, job: UserJob, selected: bool) -> Line:
         clipped_cell(cpus, CPUS_WIDTH),
         clipped_cell(memory, MEMORY_WIDTH),
         clipped_cell(gpus, GPUS_WIDTH),
-        clipped_cell(status, REASON_WIDTH),
         clipped_cell(priority_label(job), PRIORITY_WIDTH),
         clipped_cell(start, START_WIDTH),
         clipped_cell(placement, PLACEMENT_WIDTH),
@@ -242,16 +232,11 @@ def live_job_row(cluster: Cluster, job: UserJob, selected: bool) -> Line:
         (" ", "normal"),
         (values[8], "normal"),
         (" ", "normal"),
-        (
-            values[9],
-            "reserved" if job.reason == "Priority" else "normal",
-        ),
+        (values[9], "normal"),
         (" ", "normal"),
         (values[10], "normal"),
         (" ", "normal"),
-        (values[11], "normal"),
-        (" ", "normal"),
-        (values[12], placement_style),
+        (values[11], placement_style),
     )
 
 
@@ -382,6 +367,12 @@ def selected_job_details(cluster: Cluster, job: UserJob) -> list[Line]:
         line(
             ("status ", "normal"),
             (status, status_style),
+            (
+                f"  reason {job.reason}"
+                if not job.historical and not job.is_running and job.reason
+                else "",
+                "normal",
+            ),
         ),
         plain("request  " + resource_summary(cluster, job)),
         plain(
@@ -400,10 +391,7 @@ def selected_job_details(cluster: Cluster, job: UserJob) -> list[Line]:
 
     if job.historical:
         rows.append(
-            plain(
-                f"result elapsed {job.elapsed or '—'}  "
-                f"exit {job.exit_code or '—'}"
-            )
+            plain(f"result elapsed {job.elapsed or '—'}  exit {job.exit_code or '—'}")
         )
         return rows
 
@@ -443,9 +431,7 @@ def jobs_table(
         clusters if selected_scope_index == 0 else [clusters[selected_scope_index - 1]]
     )
     jobs = jobs_for_scope(clusters, selected_scope_index)
-    selected_job_index = (
-        min(max(0, selected_job_index), len(jobs) - 1) if jobs else 0
-    )
+    selected_job_index = min(max(0, selected_job_index), len(jobs) - 1) if jobs else 0
     menu = jobs_scope_menu(clusters, selected_scope_index)
     resource_columns = (
         ("TIME LIMIT", TIME_LIMIT_WIDTH),
@@ -461,7 +447,6 @@ def jobs_table(
             ("NAME", NAME_WIDTH),
             ("STATE", STATE_WIDTH),
             *resource_columns,
-            ("STATUS / REASON", REASON_WIDTH),
             ("PRIORITY", PRIORITY_WIDTH),
             ("START", START_WIDTH),
             ("PLACEMENT", PLACEMENT_WIDTH),
@@ -533,9 +518,9 @@ def jobs_table(
     for cluster in scoped_clusters:
         if cluster.history_error:
             history_errors = True
-            error_text = (
-                f"{cluster.name} history: {cluster.history_error}"[:JOBS_TABLE_WIDTH]
-            )
+            error_text = f"{cluster.name} history: {cluster.history_error}"[
+                :JOBS_TABLE_WIDTH
+            ]
             body.append(line((error_text, "offline")))
     if not past_jobs and not history_errors:
         if any(cluster.loading for cluster in scoped_clusters):

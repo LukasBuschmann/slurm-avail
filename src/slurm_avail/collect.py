@@ -49,9 +49,7 @@ JOBS_FORMAT = (
     "TimeLimit:0|,NumNodes:0|,NumCPUs:0|,MinMemory:0|,tres-per-node:0|,"
     "tres-alloc:0|,Account:0|,QOS:0"
 )
-JOBS_FALLBACK_FORMAT = (
-    "%i|%P|%j|%T|%r|%Q|%V|%S|%e|%N|%n|%l|%D|%C|%m|%b||%a|%q"
-)
+JOBS_FALLBACK_FORMAT = "%i|%P|%j|%T|%r|%Q|%V|%S|%e|%N|%n|%l|%D|%C|%m|%b||%a|%q"
 HISTORY_FORMAT = (
     "JobIDRaw,JobName,Partition,State,Submit,Start,End,Elapsed,Timelimit,"
     "NNodes,NCPUS,ReqMem,ReqTRES,AllocTRES,Account,QOS,NodeList,ExitCode"
@@ -696,11 +694,7 @@ def parse_jobs(output: str, current_user: str) -> SchedulerData:
     if not jobs_marker or not timezone_line.startswith("__TIMEZONE__|"):
         raise RuntimeError("remote jobs metadata marker missing")
     synthetic_schedule = (
-        f"{timezone_line}\n"
-        "__RESERVATIONS__\n"
-        "__RUNNING_JOBS__\n"
-        "__USER_JOBS__\n"
-        f"{rest}"
+        f"{timezone_line}\n__RESERVATIONS__\n__RUNNING_JOBS__\n__USER_JOBS__\n{rest}"
     )
     return parse_schedule(synthetic_schedule, current_user)
 

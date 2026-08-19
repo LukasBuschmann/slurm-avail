@@ -75,9 +75,14 @@ def capacity_bar(
     busy_style: str = "busy",
     highlighted_busy: int = 0,
     highlight_style: str = "mine",
+    show_busy_when_present: bool = False,
 ) -> Line:
     free_slots = rounded_free_slots(free, total, width)
-    if highlighted_busy > 0 and free > 0 and free_slots == width:
+    if (
+        free > 0
+        and free_slots == width
+        and (highlighted_busy > 0 or (show_busy_when_present and free < total))
+    ):
         free_slots -= 1
     busy_slots = width - free_slots
     highlight_slots = min(
