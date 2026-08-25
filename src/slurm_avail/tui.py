@@ -10,7 +10,11 @@ import math
 import time
 from pathlib import Path
 
-from .collect import merge_cluster_refresh, submit_cluster_refreshes
+from .collect import (
+    merge_cluster_refresh,
+    submit_cluster_refreshes,
+    submit_estimate_requests,
+)
 from .config import (
     SETTING_FIELDS,
     AppConfig,
@@ -34,6 +38,14 @@ from .constants import (
     VIEWS,
     Line,
 )
+from .estimate_views import estimate_legend_lines, estimate_table
+from .estimator import (
+    ESTIMATE_FIELDS,
+    adjust_estimate_value,
+    estimate_field_is_adjustable,
+    toggle_estimate_boolean,
+    with_estimate_value,
+)
 from .forecast_views import (
     forecast_legend_lines,
     forecast_node_label_width,
@@ -45,6 +57,7 @@ from .jobs_views import (
     jobs_table,
     sticky_jobs_headers,
 )
+from .models import EstimateRequest, EstimateResult
 from .node_views import (
     cluster_body,
     cluster_header,
@@ -243,6 +256,17 @@ def dashboard(
     jobs_cluster_index = initial_jobs_scope_index
     jobs_job_indices: dict[str, int] = {}
     jobs_selection_changed = True
+    estimate_request = EstimateRequest()
+    estimate_selection = 0
+    estimate_selected_clusters = {cluster.name for cluster in clusters}
+    estimate_results: dict[str, EstimateResult] = {}
+    estimate_futures: dict[
+        concurrent.futures.Future[EstimateResult], tuple[str, int]
+    ] = {}
+    estimate_generation = 0
+    estimate_message = ""
+    estimate_adjusting = False
+    estimate_time_component = 0
     forecast_resolution_index = FORECAST_RESOLUTIONS.index(60)
     vertical_offsets = {view: 0 for view in VIEWS}
     horizontal_offsets = {view: 0 for view in VIEWS}
@@ -264,6 +288,33 @@ def dashboard(
         refresh_includes_jobs,
         refresh_includes_history,
     )
+
+    def run_estimate_test() -> None:
+        nonlocal estimate_futures, estimate_generation, estimate_message
+        if estimate_futures:
+            estimate_message = "Test already running"
+            return
+        if not estimate_selected_clusters:
+            estimate_message = "Select at least one cluster"
+            return
+        estimate_generation += 1
+        estimate_results.clear()
+        preferred_hosts = {cluster.name: cluster.host for cluster in clusters}
+        submitted = submit_estimate_requests(
+            executor,
+            runtime_config,
+            user_override,
+            estimate_request,
+            estimate_selected_clusters,
+            preferred_hosts,
+        )
+        estimate_futures = {
+            future: (cluster_name, estimate_generation)
+            for future, cluster_name in submitted.items()
+        }
+        estimate_message = f"Testing {len(estimate_futures)} cluster" + (
+            "s" if len(estimate_futures) != 1 else ""
+        )
 
     try:
         while True:
@@ -310,6 +361,31 @@ def dashboard(
                     last_jobs_refresh = now
                 if refresh_includes_history:
                     last_history_refresh = now
+
+            completed_estimates = [
+                future for future in estimate_futures if future.done()
+            ]
+            for future in completed_estimates:
+                cluster_name, generation = estimate_futures.pop(future)
+                if generation != estimate_generation:
+                    continue
+                try:
+                    estimate_results[cluster_name] = future.result()
+                except Exception as error:
+                    estimate_results[cluster_name] = EstimateResult(
+                        cluster_name=cluster_name,
+                        status="error",
+                        message=str(error),
+                        checked_at=time.time(),
+                    )
+            if completed_estimates and not estimate_futures:
+                estimated_count = sum(
+                    result.status == "estimated" for result in estimate_results.values()
+                )
+                estimate_message = (
+                    f"Test complete: {estimated_count}/{len(estimate_results)} "
+                    "clusters returned a start time"
+                )
 
             if (
                 completed_futures
@@ -736,6 +812,90 @@ def dashboard(
                     fixed_legend_x,
                     styles,
                 )
+            elif active_view == "estimate":
+                selection_count = len(ESTIMATE_FIELDS) + 1 + len(clusters)
+                estimate_selection = min(
+                    max(0, estimate_selection),
+                    selection_count - 1,
+                )
+                pending_clusters = {
+                    cluster_name
+                    for cluster_name, generation in estimate_futures.values()
+                    if generation == estimate_generation
+                }
+                headers, body, selected_body_index, table_width = estimate_table(
+                    estimate_request,
+                    clusters,
+                    estimate_selected_clusters,
+                    estimate_results,
+                    pending_clusters,
+                    estimate_selection,
+                    estimate_message,
+                    adjusting=estimate_adjusting,
+                    time_component=estimate_time_component,
+                )
+                adjusting_time = (
+                    estimate_adjusting
+                    and estimate_selection < len(ESTIMATE_FIELDS)
+                    and ESTIMATE_FIELDS[estimate_selection].kind == "time"
+                )
+                legend = estimate_legend_lines(
+                    bool(pending_clusters),
+                    estimate_adjusting,
+                    adjusting_time,
+                )
+                header_height = len(headers)
+                body_height = max(1, viewport_height - header_height)
+                max_vertical = max(0, len(body) - body_height)
+                vertical_offset = min(
+                    max(0, vertical_offsets[active_view]), max_vertical
+                )
+                if selected_body_index < vertical_offset:
+                    vertical_offset = selected_body_index
+                elif selected_body_index >= vertical_offset + body_height:
+                    vertical_offset = selected_body_index - body_height + 1
+                vertical_offsets[active_view] = vertical_offset
+                page_height = body_height
+
+                max_horizontal = max(0, table_width - content_width)
+                horizontal_offsets[active_view] = min(
+                    max(0, horizontal_offsets[active_view]), max_horizontal
+                )
+                horizontal_offset = horizontal_offsets[active_view]
+
+                for row, header_line in enumerate(headers):
+                    draw_spans(
+                        screen,
+                        content_y + row,
+                        0,
+                        header_line,
+                        horizontal_offset,
+                        content_width,
+                        styles,
+                    )
+                for viewport_row in range(body_height):
+                    body_index = vertical_offset + viewport_row
+                    if body_index >= len(body):
+                        break
+                    draw_spans(
+                        screen,
+                        content_y + header_height + viewport_row,
+                        0,
+                        body[body_index],
+                        horizontal_offset,
+                        content_width,
+                        styles,
+                    )
+                draw_fixed_legend(
+                    screen,
+                    legend,
+                    content_y,
+                    screen_height,
+                    screen_width,
+                    fixed_divider_x,
+                    fixed_legend_x,
+                    styles,
+                )
             elif active_view == "forecast":
                 resolution_minutes = FORECAST_RESOLUTIONS[forecast_resolution_index]
                 node_label_width = forecast_node_label_width(
@@ -911,6 +1071,8 @@ def dashboard(
                 break
             backtab_key = getattr(curses, "KEY_BTAB", None)
             if key == 9 or (backtab_key is not None and key == backtab_key):
+                if active_view == "estimate":
+                    estimate_adjusting = False
                 view_index = VIEWS.index(active_view)
                 active_view = VIEWS[(view_index + 1) % len(VIEWS)]
                 if active_view == "jobs":
@@ -954,6 +1116,157 @@ def dashboard(
                 if selected_job + 1 < len(jobs_for_scope(clusters, jobs_cluster_index)):
                     jobs_job_indices[scope_key] = selected_job + 1
                     jobs_selection_changed = True
+            elif (
+                active_view == "estimate"
+                and estimate_adjusting
+                and key in (10, 13, curses.KEY_ENTER, 27)
+            ):
+                estimate_adjusting = False
+                estimate_message = "Value set; press t to test"
+            elif (
+                active_view == "estimate"
+                and estimate_adjusting
+                and key
+                in (
+                    curses.KEY_UP,
+                    curses.KEY_DOWN,
+                    curses.KEY_LEFT,
+                    curses.KEY_RIGHT,
+                )
+            ):
+                field = ESTIMATE_FIELDS[estimate_selection]
+                if field.kind == "time" and key in (
+                    curses.KEY_LEFT,
+                    curses.KEY_RIGHT,
+                ):
+                    direction = -1 if key == curses.KEY_LEFT else 1
+                    estimate_time_component = min(
+                        2,
+                        max(0, estimate_time_component + direction),
+                    )
+                else:
+                    direction = 1 if key in (curses.KEY_UP, curses.KEY_RIGHT) else -1
+                    candidate = adjust_estimate_value(
+                        estimate_request,
+                        field,
+                        direction,
+                        estimate_time_component,
+                    )
+                    if candidate != estimate_request:
+                        estimate_request = candidate
+                        estimate_results.clear()
+                        estimate_message = "Request changed; press t to test"
+            elif active_view == "estimate" and key == curses.KEY_UP:
+                estimate_selection -= 1
+            elif active_view == "estimate" and key == curses.KEY_DOWN:
+                estimate_selection += 1
+            elif active_view == "estimate" and key == curses.KEY_PPAGE:
+                estimate_selection -= max(1, page_height - 1)
+            elif active_view == "estimate" and key == curses.KEY_NPAGE:
+                estimate_selection += max(1, page_height - 1)
+            elif active_view == "estimate" and key == curses.KEY_HOME:
+                estimate_selection = 0
+            elif active_view == "estimate" and key == curses.KEY_END:
+                estimate_selection = len(ESTIMATE_FIELDS) + len(clusters)
+            elif active_view == "estimate" and key in (ord("e"), ord("E")):
+                if estimate_futures:
+                    estimate_message = "Wait for the current test to finish"
+                elif estimate_selection < len(ESTIMATE_FIELDS):
+                    field = ESTIMATE_FIELDS[estimate_selection]
+                    entered = prompt_text(
+                        screen,
+                        field.prompt,
+                        str(getattr(estimate_request, field.key)),
+                        styles,
+                    )
+                    if entered is not None:
+                        try:
+                            candidate = with_estimate_value(
+                                estimate_request,
+                                field,
+                                entered,
+                            )
+                            if candidate != estimate_request:
+                                estimate_request = candidate
+                                estimate_results.clear()
+                                estimate_message = "Request changed; press t to test"
+                        except ValueError as error:
+                            estimate_message = str(error)
+                    estimate_adjusting = False
+            elif active_view == "estimate" and key in (
+                10,
+                13,
+                curses.KEY_ENTER,
+            ):
+                if estimate_futures:
+                    estimate_message = "Wait for the current test to finish"
+                elif estimate_selection < len(ESTIMATE_FIELDS):
+                    field = ESTIMATE_FIELDS[estimate_selection]
+                    if estimate_field_is_adjustable(field):
+                        estimate_adjusting = True
+                        estimate_time_component = 0
+                        estimate_message = (
+                            "Adjust with arrow keys; Enter or Esc finishes"
+                        )
+                    else:
+                        entered = prompt_text(
+                            screen,
+                            field.prompt,
+                            str(getattr(estimate_request, field.key)),
+                            styles,
+                        )
+                        if entered is not None:
+                            try:
+                                candidate = with_estimate_value(
+                                    estimate_request,
+                                    field,
+                                    entered,
+                                )
+                                if candidate != estimate_request:
+                                    estimate_request = candidate
+                                    estimate_results.clear()
+                                    estimate_message = (
+                                        "Request changed; press t to test"
+                                    )
+                            except ValueError as error:
+                                estimate_message = str(error)
+                elif estimate_selection == len(ESTIMATE_FIELDS):
+                    run_estimate_test()
+                else:
+                    cluster_index = estimate_selection - len(ESTIMATE_FIELDS) - 1
+                    cluster_name = clusters[cluster_index].name
+                    if cluster_name in estimate_selected_clusters:
+                        estimate_selected_clusters.remove(cluster_name)
+                    else:
+                        estimate_selected_clusters.add(cluster_name)
+                    estimate_message = "Cluster selection changed; press t to test"
+            elif active_view == "estimate" and key == ord(" "):
+                if estimate_futures:
+                    estimate_message = "Wait for the current test to finish"
+                elif estimate_selection < len(ESTIMATE_FIELDS):
+                    field = ESTIMATE_FIELDS[estimate_selection]
+                    if field.kind == "boolean":
+                        estimate_request = toggle_estimate_boolean(
+                            estimate_request,
+                            field,
+                        )
+                        estimate_results.clear()
+                        estimate_message = "Request changed; press t to test"
+                elif estimate_selection > len(ESTIMATE_FIELDS):
+                    cluster_index = estimate_selection - len(ESTIMATE_FIELDS) - 1
+                    cluster_name = clusters[cluster_index].name
+                    if cluster_name in estimate_selected_clusters:
+                        estimate_selected_clusters.remove(cluster_name)
+                    else:
+                        estimate_selected_clusters.add(cluster_name)
+                    estimate_message = "Cluster selection changed; press t to test"
+            elif active_view == "estimate" and key in (
+                ord("t"),
+                ord("T"),
+                ord("r"),
+                ord("R"),
+            ):
+                run_estimate_test()
             elif active_view == "forecast" and key in (ord("["), ord("{")):
                 forecast_cluster_index = (forecast_cluster_index - 1) % len(clusters)
                 horizontal_offsets[active_view] = 0
@@ -1150,6 +1463,18 @@ def dashboard(
                         runtime_config,
                         user_override,
                     )
+                    estimate_generation += 1
+                    for future in estimate_futures:
+                        future.cancel()
+                    estimate_futures.clear()
+                    estimate_results.clear()
+                    estimate_selected_clusters = {cluster.name for cluster in clusters}
+                    estimate_selection = min(
+                        estimate_selection,
+                        len(ESTIMATE_FIELDS) + len(clusters),
+                    )
+                    estimate_adjusting = False
+                    estimate_message = "Configuration changed; press t to test"
                     forecast_cluster_index = min(
                         forecast_cluster_index,
                         len(clusters) - 1,
@@ -1190,6 +1515,18 @@ def dashboard(
                         runtime_config,
                         user_override,
                     )
+                    estimate_generation += 1
+                    for future in estimate_futures:
+                        future.cancel()
+                    estimate_futures.clear()
+                    estimate_results.clear()
+                    estimate_selected_clusters = {cluster.name for cluster in clusters}
+                    estimate_selection = min(
+                        estimate_selection,
+                        len(ESTIMATE_FIELDS) + len(clusters),
+                    )
+                    estimate_adjusting = False
+                    estimate_message = "Configuration changed; press t to test"
                     forecast_cluster_index = min(
                         forecast_cluster_index,
                         len(clusters) - 1,

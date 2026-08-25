@@ -309,7 +309,7 @@ def forecast_table(
     if cluster.error:
         return (
             headers,
-            [line((cluster.error[:table_width], "offline"))],
+            [line(("CLUSTER DOWN", "drained"))],
             table_width,
             resource_name,
             total_interval_count,

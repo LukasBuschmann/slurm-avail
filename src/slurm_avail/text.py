@@ -133,6 +133,11 @@ def tab_line(active_view: str, context: str) -> Line:
         ),
         ("  ", "normal"),
         (
+            "[ESTIMATE]",
+            "title" if active_view == "estimate" else "normal",
+        ),
+        ("  ", "normal"),
+        (
             "[FORECAST]",
             "title" if active_view == "forecast" else "normal",
         ),

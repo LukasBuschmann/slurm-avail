@@ -46,6 +46,19 @@ estimates are presented as estimates, not predictions made by the dashboard.
 The history window and its refresh interval are configurable; they default to
 seven days and one minute.
 
+**Estimate** compares one hypothetical resource request across selected
+clusters. Edit the node, task, CPU, memory, GPU, time, partition, account, QoS,
+and constraint fields, choose the clusters, then press `t`. Each cluster runs
+`srun --test-only` independently and reports Slurm's expected start, wait,
+partition, nodes, and processor count. The command does not submit a job. Its
+answer still depends on the current queue, scheduler policy, and the user's
+fair-share state, so the reported start can change.
+
+Select a numeric request field and press `Enter` to adjust it with the arrow
+keys. For a time limit, Left and Right choose hours, minutes, or seconds while
+Up and Down change that part. Press `e` to type an exact value instead. The
+selectable `[ RUN TEST ]` row and the `t` shortcut perform the same test.
+
 **Forecast** presents a per-node timeline of exact Slurm reservations and the
 remaining time limits of currently running jobs. The timeline can be zoomed
 and navigated from short operational windows up to a year. It deliberately
@@ -90,7 +103,7 @@ On first launch, the Config view opens automatically and creates:
 
 Select the initial local cluster and press `Enter` to edit it, or press `a` to
 add an SSH cluster. Press `s` to save and apply, then use `Tab` to switch
-between Nodes, Filesystems, Login Nodes, Jobs, Forecast, and Config.
+between Nodes, Filesystems, Login Nodes, Jobs, Estimate, Forecast, and Config.
 
 You can return directly to configuration with:
 
@@ -199,6 +212,9 @@ slurm-avail --config /path/to/config.toml
 | `Page Up` / `Page Down` | Scroll by page |
 | `Home` / `End` | Jump to top or bottom |
 | `r` | Refresh now |
+| `t` | Run the request in the Estimate view |
+| `Enter` | Adjust an Estimate field or activate its Run Test row |
+| `Space` | Include or exclude a cluster in the Estimate view |
 | `+` / `-` | Change forecast resolution |
 | `[` / `]` | Change Jobs scope or Forecast cluster |
 | `q` | Quit |
@@ -220,6 +236,8 @@ On each configured cluster endpoint:
 - a working Slurm installation connected to the cluster controller
 - Slurm's `scontrol` and `squeue` commands available on `PATH` or through the
   configured `slurm_bin_path`
+- Slurm's `srun --test-only` support for the Estimate view. Other views still
+  work if the command or option is unavailable.
 - Slurm's `sprio` and `sshare` commands for Jobs priority and fair-share
   details (the Jobs view degrades gracefully when they are unavailable)
 - Slurm's `sacct` command and accounting data for recent Jobs history (live

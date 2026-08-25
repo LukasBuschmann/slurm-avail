@@ -230,12 +230,11 @@ def cluster_header(cluster: Cluster) -> list[Line]:
         return header
 
     if cluster.error:
-        message = cluster.error.replace("\n", " ")[:CLUSTER_WIDTH]
         header.extend(
             [
                 plain(""),
-                line(("UNAVAILABLE", "offline")),
-                plain(message),
+                line(("DOWN", "drained")),
+                plain(""),
                 plain(""),
                 plain(""),
                 plain(""),

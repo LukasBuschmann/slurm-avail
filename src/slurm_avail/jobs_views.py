@@ -488,17 +488,15 @@ def jobs_table(
             selected_body_index = len(body)
         body.append(job_row(cluster, job, job_index == selected_job_index))
         job_index += 1
-    live_errors = False
-    for cluster in scoped_clusters:
-        error = cluster.error or cluster.jobs_error
-        if error:
-            live_errors = True
-            error_text = f"{cluster.name}: {error}"[:JOBS_TABLE_WIDTH]
-            body.append(line((error_text, "offline")))
-    if not live_jobs and not live_errors:
+    live_sources = [
+        cluster
+        for cluster in scoped_clusters
+        if not cluster.error and not cluster.jobs_error
+    ]
+    if not live_jobs:
         if any(cluster.loading for cluster in scoped_clusters):
             body.append(line(("Loading live jobs…", "cpu")))
-        else:
+        elif live_sources:
             body.append(plain("No running or pending jobs for the selected user(s)."))
 
     body.extend(
@@ -514,18 +512,15 @@ def jobs_table(
             selected_body_index = len(body)
         body.append(job_row(cluster, job, job_index == selected_job_index))
         job_index += 1
-    history_errors = False
-    for cluster in scoped_clusters:
-        if cluster.history_error:
-            history_errors = True
-            error_text = f"{cluster.name} history: {cluster.history_error}"[
-                :JOBS_TABLE_WIDTH
-            ]
-            body.append(line((error_text, "offline")))
-    if not past_jobs and not history_errors:
+    history_sources = [
+        cluster
+        for cluster in scoped_clusters
+        if not cluster.error and not cluster.history_error
+    ]
+    if not past_jobs:
         if any(cluster.loading for cluster in scoped_clusters):
             body.append(line(("Loading job history…", "cpu")))
-        else:
+        elif history_sources:
             body.append(plain("No recent job history for the selected user(s)."))
     details: list[Line] = []
     if jobs:

@@ -19,8 +19,11 @@ from .config import (
     DashboardSettings,
     active_cluster_configs,
 )
+from .estimator import validate_estimate_request
 from .models import (
     Cluster,
+    EstimateRequest,
+    EstimateResult,
     FairshareAssociation,
     Filesystem,
     LoginNode,
@@ -165,7 +168,65 @@ if history_rows=$(
 else
     printf '__ERROR__|%s\n' "$(printf '%s\n' "$history_rows" | sed -n '1p')"
 fi
-"""
+    """
+
+
+def estimate_command(
+    cluster_config: ClusterConfig,
+    request: EstimateRequest,
+) -> str:
+    """Build a non-submitting Slurm scheduler test command."""
+    validate_estimate_request(request)
+    arguments = [
+        "srun",
+        "--test-only",
+        f"--nodes={request.nodes}",
+        f"--ntasks-per-node={request.tasks_per_node}",
+        f"--cpus-per-task={request.cpus_per_task}",
+        f"--mem={request.memory_per_node}",
+        f"--time={request.time_limit}",
+    ]
+    if request.gpus_per_node:
+        gpu_request = "gpu"
+        if request.gpu_type:
+            gpu_request += f":{request.gpu_type}"
+        gpu_request += f":{request.gpus_per_node}"
+        arguments.append(f"--gres={gpu_request}")
+    if request.partition:
+        arguments.append(f"--partition={request.partition}")
+    if request.account:
+        arguments.append(f"--account={request.account}")
+    if request.qos:
+        arguments.append(f"--qos={request.qos}")
+    if request.constraint:
+        arguments.append(f"--constraint={request.constraint}")
+    if request.exclusive:
+        arguments.append("--exclusive")
+
+    command_lines: list[str] = []
+    if cluster_config.slurm_bin_path:
+        command_lines.append(
+            f"export PATH={shlex.quote(cluster_config.slurm_bin_path)}:$PATH"
+        )
+    command_lines.extend(
+        [
+            (
+                "unset SLURM_JOB_ID SLURM_JOBID SLURM_STEP_ID SLURM_STEPID "
+                "SLURM_ACCOUNT SLURM_PARTITION SLURM_QOS SLURM_CONSTRAINT "
+                "SLURM_NTASKS SLURM_NTASKS_PER_NODE SLURM_CPUS_PER_TASK "
+                "SLURM_MEM_PER_NODE SLURM_MEM_PER_CPU SLURM_MEM_PER_GPU "
+                "SLURM_GPUS SLURM_GPUS_PER_NODE SLURM_GRES SLURM_TIMELIMIT"
+            ),
+            "printf '__ESTIMATE__\\n'",
+            "printf '__TIMEZONE__|'",
+            "date +%z",
+            f"slurm_avail_estimate_output=$(LC_ALL=C {shlex.join(arguments)} 2>&1)",
+            "slurm_avail_estimate_status=$?",
+            "printf '__EXIT__|%s\\n' \"$slurm_avail_estimate_status\"",
+            "printf '%s\\n' \"$slurm_avail_estimate_output\"",
+        ]
+    )
+    return "\n".join(command_lines) + "\n"
 
 
 def parse_int(value: str | None) -> int:
@@ -396,6 +457,90 @@ def parse_slurm_time(value: str, utc_offset: str) -> float | None:
         ).timestamp()
     except ValueError:
         return None
+
+
+def parse_estimate_response(
+    output: str,
+    cluster_name: str,
+    endpoint: str,
+    checked_at: float,
+) -> EstimateResult:
+    timezone_line, exit_marker, rest = output.partition("\n__EXIT__|")
+    if not exit_marker or not timezone_line.startswith("__TIMEZONE__|"):
+        raise RuntimeError("remote estimate metadata marker missing")
+    utc_offset = timezone_line.removeprefix("__TIMEZONE__|").strip()
+    if not re.fullmatch(r"[+-]\d{4}", utc_offset):
+        raise RuntimeError("remote estimate timezone missing")
+    exit_text, separator, scheduler_output = rest.partition("\n")
+    if not separator:
+        scheduler_output = ""
+    try:
+        exit_code = int(exit_text.strip())
+    except ValueError as error:
+        raise RuntimeError("remote estimate exit status missing") from error
+
+    clean_lines = []
+    for raw_line in scheduler_output.splitlines():
+        cleaned = re.sub(r"^srun:\s*(?:error:\s*)?", "", raw_line.strip())
+        if cleaned:
+            clean_lines.append(cleaned)
+    message = "; ".join(clean_lines)[:500]
+    if exit_code != 0:
+        command_error = exit_code in (126, 127) or re.search(
+            r"command not found|unrecognized option|unknown option|invalid option",
+            message,
+            re.I,
+        )
+        return EstimateResult(
+            cluster_name=cluster_name,
+            status="error" if command_error else "rejected",
+            endpoint=endpoint,
+            message=message or f"srun exited with status {exit_code}",
+            checked_at=checked_at,
+        )
+
+    start_match = re.search(r"\bto start at\s+(\S+)", scheduler_output, re.I)
+    if start_match is None:
+        return EstimateResult(
+            cluster_name=cluster_name,
+            status="unknown",
+            endpoint=endpoint,
+            message=message or "Slurm returned no start estimate",
+            checked_at=checked_at,
+        )
+    start = parse_slurm_time(start_match.group(1), utc_offset)
+    if start is None:
+        return EstimateResult(
+            cluster_name=cluster_name,
+            status="unknown",
+            endpoint=endpoint,
+            message=message or "Slurm returned an unknown start time",
+            checked_at=checked_at,
+        )
+
+    job_match = re.search(r"\bJob\s+(\S+)", scheduler_output, re.I)
+    processor_match = re.search(
+        r"\busing\s+(\d+)\s+processors?",
+        scheduler_output,
+        re.I,
+    )
+    node_match = re.search(r"\bon\s+nodes?\s+(\S+)", scheduler_output, re.I)
+    partition_match = re.search(
+        r"\bin\s+partition\s+(\S+)",
+        scheduler_output,
+        re.I,
+    )
+    return EstimateResult(
+        cluster_name=cluster_name,
+        status="estimated",
+        endpoint=endpoint,
+        start=start,
+        job_id=job_match.group(1) if job_match else "",
+        processors=int(processor_match.group(1)) if processor_match else 0,
+        nodes=node_match.group(1) if node_match else "",
+        partition=partition_match.group(1) if partition_match else "",
+        checked_at=checked_at,
+    )
 
 
 def parse_gpu_count(tres: str) -> int:
@@ -776,10 +921,14 @@ def ssh_error_message(error: BaseException) -> str:
     if isinstance(error, subprocess.TimeoutExpired):
         timeout = f"{error.timeout:g}" if error.timeout is not None else "?"
         return f"request timed out after {timeout}s"
-    if isinstance(error, subprocess.CalledProcessError) and error.stderr:
-        return error.stderr.strip().splitlines()[0]
+    if isinstance(error, subprocess.CalledProcessError):
+        if error.stderr:
+            return error.stderr.strip().splitlines()[0]
+        return "request failed"
     if isinstance(error, FileNotFoundError):
         return f"command not found: {error.filename}"
+    if isinstance(error, subprocess.SubprocessError):
+        return "request failed"
     return str(error)
 
 
@@ -933,6 +1082,73 @@ def run_endpoint(
         command,
         command_timeout,
         settings.ssh_connect_timeout_seconds,
+    )
+
+
+def fetch_estimate_from_endpoint(
+    cluster_config: ClusterConfig,
+    endpoint: str,
+    ssh_user: str,
+    settings: DashboardSettings,
+    request: EstimateRequest,
+) -> EstimateResult:
+    checked_at = time.time()
+    result = run_endpoint(
+        cluster_config,
+        endpoint,
+        ssh_user,
+        estimate_command(cluster_config, request),
+        settings,
+    )
+    marker = "__ESTIMATE__\n"
+    if not result.stdout.startswith(marker):
+        raise RuntimeError("remote estimate marker missing")
+    return parse_estimate_response(
+        result.stdout.removeprefix(marker),
+        cluster_config.name,
+        endpoint,
+        checked_at,
+    )
+
+
+def fetch_cluster_estimate(
+    cluster_config: ClusterConfig,
+    settings: DashboardSettings,
+    user_override: str | None,
+    request: EstimateRequest,
+    preferred_host: str | None = None,
+) -> EstimateResult:
+    """Run one test-only request with normal endpoint failover."""
+    endpoints = (
+        ["local"] if cluster_config.mode == "local" else list(cluster_config.addresses)
+    )
+    ssh_user = cluster_user(cluster_config, user_override)
+    ordered_hosts = list(endpoints)
+    if preferred_host in ordered_hosts:
+        ordered_hosts.remove(preferred_host)
+        ordered_hosts.insert(0, preferred_host)
+
+    last_error = "no login nodes configured"
+    for endpoint in ordered_hosts:
+        for attempt in range(settings.retries_per_address + 1):
+            try:
+                return fetch_estimate_from_endpoint(
+                    cluster_config,
+                    endpoint,
+                    ssh_user,
+                    settings,
+                    request,
+                )
+            except (OSError, RuntimeError, subprocess.SubprocessError) as error:
+                last_error = ssh_error_message(error)
+                if attempt < settings.retries_per_address:
+                    time.sleep(settings.retry_delay_seconds)
+    return EstimateResult(
+        cluster_name=cluster_config.name,
+        status="error",
+        endpoint=preferred_host or (endpoints[0] if endpoints else ""),
+        message=last_error,
+        checked_at=time.time(),
     )
 
 
@@ -1203,6 +1419,34 @@ def submit_cluster_refreshes(
             preferred_hosts.get(cluster_config.name),
         ): cluster_config.name
         for cluster_config in active_cluster_configs(config_snapshot)
+    }
+
+
+def submit_estimate_requests(
+    executor: concurrent.futures.ThreadPoolExecutor,
+    config: AppConfig,
+    user_override: str | None,
+    request: EstimateRequest,
+    cluster_names: set[str],
+    preferred_hosts: dict[str, str] | None = None,
+) -> dict[concurrent.futures.Future[EstimateResult], str]:
+    """Test the same request against each selected cluster independently."""
+    validate_estimate_request(request)
+    preferred_hosts = preferred_hosts or {}
+    config_snapshot = copy.deepcopy(config)
+    request_snapshot = copy.deepcopy(request)
+    selected = {name.casefold() for name in cluster_names}
+    return {
+        executor.submit(
+            fetch_cluster_estimate,
+            cluster_config,
+            config_snapshot.settings,
+            user_override,
+            request_snapshot,
+            preferred_hosts.get(cluster_config.name),
+        ): cluster_config.name
+        for cluster_config in active_cluster_configs(config_snapshot)
+        if cluster_config.name.casefold() in selected
     }
 
 

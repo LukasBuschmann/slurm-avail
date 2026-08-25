@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import subprocess
 from datetime import datetime
 
 from slurm_avail.collect import (
@@ -12,6 +13,7 @@ from slurm_avail.collect import (
     parse_memory_mb,
     parse_nodes,
     parse_schedule,
+    ssh_error_message,
 )
 from slurm_avail.config import ClusterConfig, DashboardSettings
 
@@ -23,6 +25,12 @@ def test_expand_hostlist() -> None:
         "gpu05",
         "login7",
     )
+
+
+def test_ssh_error_without_stderr_does_not_expose_command() -> None:
+    error = subprocess.CalledProcessError(255, ["ssh", "private-login.example"])
+
+    assert ssh_error_message(error) == "request failed"
 
 
 def test_parse_filesystem_posix_kilobytes() -> None:

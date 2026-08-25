@@ -224,3 +224,26 @@ def test_forecast_colors_current_users_usage_and_reservation() -> None:
 
     assert "forecast_mine_usage" in styles
     assert "forecast_mine_reserved" in styles
+
+
+def test_down_cluster_views_do_not_expose_transport_error() -> None:
+    error = "Command '['ssh', '-l', 'researcher', 'login.example'] failed"
+    cluster = Cluster(name="GPU", host="login", error=error)
+
+    header_text = "\n".join(
+        "".join(value for value, _style in row) for row in cluster_header(cluster)
+    )
+    _headers, body, *_rest = forecast_table(
+        [cluster],
+        selected_index=0,
+        now_epoch=time.time(),
+        colored=True,
+        resolution_minutes=60,
+        window_hours=2,
+    )
+    body_text = "\n".join("".join(value for value, _style in row) for row in body)
+
+    assert "DOWN" in header_text
+    assert "UNAVAILABLE" not in header_text
+    assert error not in header_text
+    assert body_text == "CLUSTER DOWN"

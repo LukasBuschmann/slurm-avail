@@ -23,7 +23,15 @@ GPU_LEVELS = "▁▂▃▄▅▆▇█"
 FORECAST_LEVELS = GPU_LEVELS
 FORECAST_STATE_WIDTH = 4
 LOADING_FRAMES = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
-VIEWS = ("nodes", "filesystems", "logins", "jobs", "forecast", "config")
+VIEWS = (
+    "nodes",
+    "filesystems",
+    "logins",
+    "jobs",
+    "estimate",
+    "forecast",
+    "config",
+)
 
 Span = tuple[str, str]
 Line = list[Span]

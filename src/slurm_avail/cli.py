@@ -13,7 +13,9 @@ from .collect import fetch_all_clusters
 from .config import AppConfig, active_cluster_configs, load_config
 from .constants import DEFAULT_CONFIG_PATH, VIEWS
 from .output import (
+    placeholder_clusters,
     render_config_once,
+    render_estimate_once,
     render_filesystems_once,
     render_forecast_once,
     render_jobs_once,
@@ -132,6 +134,12 @@ def main() -> int:
     if arguments.once or not (sys.stdin.isatty() and sys.stdout.isatty()):
         if initial_view == "config":
             render_config_once(config, config_path)
+            return 0
+        if initial_view == "estimate":
+            render_estimate_once(
+                placeholder_clusters(config, arguments.user),
+                context,
+            )
             return 0
         clusters = fetch_all_clusters(
             config,

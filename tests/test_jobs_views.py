@@ -176,6 +176,26 @@ def test_jobs_all_scope_combines_running_and_pending_across_clusters() -> None:
     assert "executing" not in text
 
 
+def test_jobs_table_hides_cluster_and_scheduler_errors() -> None:
+    command = "Command '['ssh', '-l', 'researcher', 'login.example'] failed"
+    clusters = [
+        Cluster(name="DOWN", host="login", error=command),
+        Cluster(
+            name="BROKEN",
+            host="login",
+            jobs_error="squeue failed",
+            history_error="sacct failed",
+        ),
+    ]
+
+    headers, body, *_rest = jobs_table(clusters, 0, 0)
+    text = "\n".join("".join(value for value, _style in row) for row in headers + body)
+
+    assert command not in text
+    assert "squeue failed" not in text
+    assert "sacct failed" not in text
+
+
 def test_jobs_table_separates_history_and_keeps_selected_details_separate() -> None:
     past = UserJob(
         job_id="9",

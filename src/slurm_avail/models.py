@@ -154,6 +154,36 @@ class SchedulerData:
 
 
 @dataclass
+class EstimateRequest:
+    nodes: int = 1
+    tasks_per_node: int = 1
+    cpus_per_task: int = 1
+    memory_per_node: str = "4G"
+    gpus_per_node: int = 0
+    gpu_type: str = ""
+    time_limit: str = "01:00:00"
+    partition: str = ""
+    account: str = ""
+    qos: str = ""
+    constraint: str = ""
+    exclusive: bool = False
+
+
+@dataclass
+class EstimateResult:
+    cluster_name: str
+    status: str
+    endpoint: str = ""
+    start: float | None = None
+    job_id: str = ""
+    processors: int = 0
+    nodes: str = ""
+    partition: str = ""
+    message: str = ""
+    checked_at: float = 0.0
+
+
+@dataclass
 class LoginNode:
     hostname: str
     checked: bool = False

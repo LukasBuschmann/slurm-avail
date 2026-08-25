@@ -9,9 +9,10 @@ from .collect import cluster_user
 from .config import AppConfig, DashboardSettings, active_cluster_configs
 from .config_views import config_table
 from .constants import CLUSTER_WIDTH, GAP, LOGIN_TABLE_WIDTH, Line
+from .estimate_views import estimate_legend_lines, estimate_table
 from .forecast_views import forecast_legend_lines, forecast_table
 from .jobs_views import jobs_legend_lines, jobs_table
-from .models import Cluster, LoginNode
+from .models import Cluster, EstimateRequest, LoginNode
 from .node_views import (
     cluster_body,
     cluster_header,
@@ -203,6 +204,31 @@ def render_jobs_once(
         history_refresh_seconds=settings.jobs_history_refresh_seconds,
     )
     table_rows = headers + body + details
+    total_height = max(len(table_rows), len(legend))
+    legend_x = table_width + GAP
+    for row in range(total_height):
+        table_text = spans_text(table_rows[row]) if row < len(table_rows) else ""
+        legend_text = spans_text(legend[row]) if row < len(legend) else ""
+        print(table_text[:table_width].ljust(legend_x) + "│ " + legend_text)
+
+
+def render_estimate_once(
+    clusters: list[Cluster],
+    context: str,
+) -> None:
+    print(spans_text(tab_line("estimate", context)))
+    print()
+    headers, body, _selected_body, table_width = estimate_table(
+        EstimateRequest(),
+        clusters,
+        {cluster.name for cluster in clusters},
+        {},
+        set(),
+        0,
+        "Open the live UI to edit and test this request",
+    )
+    legend = estimate_legend_lines(False)
+    table_rows = headers + body
     total_height = max(len(table_rows), len(legend))
     legend_x = table_width + GAP
     for row in range(total_height):
