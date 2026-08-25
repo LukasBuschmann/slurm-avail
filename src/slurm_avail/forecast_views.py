@@ -307,9 +307,17 @@ def forecast_table(
     headers.append(plain("─" * table_width))
 
     if cluster.error:
+        status = "AUTHENTICATION REQUIRED" if cluster.auth_required else "CLUSTER DOWN"
         return (
             headers,
-            [line(("CLUSTER DOWN", "drained"))],
+            [
+                line(
+                    (
+                        status,
+                        "reserved" if cluster.auth_required else "drained",
+                    )
+                )
+            ],
             table_width,
             resource_name,
             total_interval_count,

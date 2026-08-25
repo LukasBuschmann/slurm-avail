@@ -189,6 +189,7 @@ class LoginNode:
     checked: bool = False
     reachable: bool = False
     used: bool = False
+    auth_required: bool = False
     error: str | None = None
 
 
@@ -214,6 +215,7 @@ class Cluster:
     priority_error: str | None = None
     fairshare_error: str | None = None
     loading: bool = False
+    auth_required: bool = False
     error: str | None = None
 
     @property

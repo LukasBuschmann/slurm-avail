@@ -34,6 +34,8 @@ class ClusterConfig:
     mode: str = "ssh"
     addresses: list[str] = field(default_factory=list)
     user: str | None = None
+    authentication: str = "batch"
+    control_persist_seconds: int = 3600
     focus: str = "auto"
     hidden: bool = False
     filesystems: list[str] = field(default_factory=list)
@@ -96,6 +98,8 @@ def config_to_dict(config: AppConfig) -> dict[str, object]:
                 "mode": cluster.mode,
                 "addresses": cluster.addresses,
                 "user": cluster.user,
+                "authentication": cluster.authentication,
+                "control_persist_seconds": cluster.control_persist_seconds,
                 "focus": cluster.focus,
                 "hidden": cluster.hidden,
                 "filesystems": cluster.filesystems,
@@ -125,6 +129,7 @@ def validate_config(config: AppConfig) -> None:
     for cluster in config.clusters:
         cluster.name = cluster.name.strip()
         cluster.mode = cluster.mode.strip().lower()
+        cluster.authentication = cluster.authentication.strip().lower()
         cluster.focus = cluster.focus.strip().lower()
         cluster.addresses = [
             address.strip() for address in cluster.addresses if address.strip()
@@ -153,6 +158,18 @@ def validate_config(config: AppConfig) -> None:
             raise ValueError(f"{cluster.name}: mode must be 'ssh' or 'local'")
         if cluster.mode == "ssh" and not cluster.addresses:
             raise ValueError(f"{cluster.name}: SSH mode needs an address")
+        if cluster.authentication not in ("batch", "interactive"):
+            raise ValueError(
+                f"{cluster.name}: authentication must be batch or interactive"
+            )
+        if (
+            not isinstance(cluster.control_persist_seconds, int)
+            or isinstance(cluster.control_persist_seconds, bool)
+            or not 1 <= cluster.control_persist_seconds <= 86400
+        ):
+            raise ValueError(
+                f"{cluster.name}: control_persist_seconds must be between 1 and 86400"
+            )
         if cluster.focus not in ("auto", "cpu", "gpu"):
             raise ValueError(f"{cluster.name}: focus must be auto, cpu, or gpu")
         if not isinstance(cluster.hidden, bool):
@@ -191,6 +208,16 @@ def app_config_from_dict(data: object) -> AppConfig:
     for index, raw_cluster in enumerate(clusters_data):
         if not isinstance(raw_cluster, dict):
             raise ValueError(f"clusters[{index}] must be a TOML table")
+        secret_fields = {
+            key
+            for key in raw_cluster
+            if "password" in key.casefold() or "passphrase" in key.casefold()
+        }
+        if secret_fields:
+            raise ValueError(
+                f"clusters[{index}] must not contain passwords or passphrases; "
+                'use authentication = "interactive"'
+            )
         name = raw_cluster.get("name", "")
         if not isinstance(name, str):
             raise ValueError(f"clusters[{index}].name must be a string")
@@ -198,12 +225,24 @@ def app_config_from_dict(data: object) -> AppConfig:
         if user is not None and not isinstance(user, str):
             raise ValueError(f"clusters[{index}].user must be a string or null")
         mode = raw_cluster.get("mode", "ssh")
+        authentication = raw_cluster.get("authentication", "batch")
+        control_persist_seconds = raw_cluster.get("control_persist_seconds", 3600)
         focus = raw_cluster.get("focus", "auto")
         hidden = raw_cluster.get("hidden", False)
         slurm_bin_path = raw_cluster.get("slurm_bin_path", "")
-        if not all(isinstance(value, str) for value in (mode, focus, slurm_bin_path)):
+        if not all(
+            isinstance(value, str)
+            for value in (mode, authentication, focus, slurm_bin_path)
+        ):
             raise ValueError(
-                f"clusters[{index}] mode, focus, and slurm_bin_path must be strings"
+                f"clusters[{index}] mode, authentication, focus, and "
+                "slurm_bin_path must be strings"
+            )
+        if not isinstance(control_persist_seconds, int) or isinstance(
+            control_persist_seconds, bool
+        ):
+            raise ValueError(
+                f"clusters[{index}].control_persist_seconds must be an integer"
             )
         if not isinstance(hidden, bool):
             raise ValueError(f"clusters[{index}].hidden must be true or false")
@@ -216,6 +255,8 @@ def app_config_from_dict(data: object) -> AppConfig:
                     f"clusters[{index}].addresses",
                 ),
                 user=user,
+                authentication=authentication,
+                control_persist_seconds=control_persist_seconds,
                 focus=focus,
                 hidden=hidden,
                 filesystems=string_list(
@@ -262,6 +303,8 @@ def save_config(config: AppConfig, path: Path) -> None:
                 lines.append(f"user = {json.dumps(cluster.user, ensure_ascii=False)}")
             lines.extend(
                 [
+                    f"authentication = {json.dumps(cluster.authentication)}",
+                    f"control_persist_seconds = {cluster.control_persist_seconds}",
                     f"focus = {json.dumps(cluster.focus)}",
                     f"hidden = {str(cluster.hidden).lower()}",
                     "filesystems = ["

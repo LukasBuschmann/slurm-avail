@@ -176,6 +176,9 @@ def login_table(clusters: list[Cluster]) -> list[Line]:
             if not login_node.checked:
                 status_text = "WAIT"
                 status_style = "busy"
+            elif login_node.auth_required:
+                status_text = "AUTH"
+                status_style = "reserved"
             elif login_node.reachable:
                 status_text = "OK"
                 status_style = "free"
@@ -230,10 +233,12 @@ def cluster_header(cluster: Cluster) -> list[Line]:
         return header
 
     if cluster.error:
+        status = "AUTH REQUIRED" if cluster.auth_required else "DOWN"
+        status_style = "reserved" if cluster.auth_required else "drained"
         header.extend(
             [
                 plain(""),
-                line(("DOWN", "drained")),
+                line((status, status_style)),
                 plain(""),
                 plain(""),
                 plain(""),
@@ -588,6 +593,7 @@ def login_legend_lines(
         line(("LEGEND", "title")),
         plain("-" * LEGEND_WIDTH),
         line(("OK", "free"), (" reachable", "normal")),
+        line(("AUTH", "reserved"), (" authentication required", "normal")),
         line(("FAIL", "drained"), (" unavailable", "normal")),
         line(("DATA", "cpu"), (" current source", "normal")),
         *ownership_legend_lines(),

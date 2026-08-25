@@ -74,6 +74,18 @@ def config_table(
         body.extend(
             [
                 plain(f"      mode / focus   {cluster.mode} / {cluster.focus}"),
+                plain(
+                    "      authentication "
+                    + (
+                        "local"
+                        if cluster.mode == "local"
+                        else (
+                            f"interactive · {cluster.control_persist_seconds}s"
+                            if cluster.authentication == "interactive"
+                            else "batch"
+                        )
+                    )
+                ),
                 line(
                     ("      user           ", "normal"),
                     (user, "mine" if cluster.user else "busy"),
@@ -93,6 +105,7 @@ def config_legend_lines(dirty: bool) -> list[Line]:
         line(("CONFIG EDITOR", "title")),
         plain("-" * LEGEND_WIDTH),
         plain("Enter/e  edit selected"),
+        plain("c  connect selected"),
         plain("h  hide/show cluster"),
         plain("Shift+↑/↓  move cluster"),
         plain("a  add cluster"),
@@ -211,9 +224,32 @@ def edit_cluster_dialog(
         if user is None:
             return None
         cluster.user = user.strip() or None
+        authentication = prompt_text(
+            screen,
+            "Authentication (batch/interactive)",
+            cluster.authentication,
+            styles,
+        )
+        if authentication is None:
+            return None
+        cluster.authentication = authentication.strip().lower()
+        if cluster.authentication == "interactive":
+            lifetime = prompt_text(
+                screen,
+                "Authenticated session lifetime in seconds",
+                str(cluster.control_persist_seconds),
+                styles,
+            )
+            if lifetime is None:
+                return None
+            try:
+                cluster.control_persist_seconds = int(lifetime.strip())
+            except ValueError:
+                cluster.control_persist_seconds = 0
     else:
         cluster.addresses = []
         cluster.user = None
+        cluster.authentication = "batch"
 
     slurm_path = prompt_text(
         screen,

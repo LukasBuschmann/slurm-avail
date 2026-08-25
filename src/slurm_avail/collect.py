@@ -34,6 +34,7 @@ from .models import (
     SchedulerData,
     UserJob,
 )
+from .ssh_auth import multiplex_options
 
 UNAVAILABLE_RE = re.compile(
     r"DOWN|DRAIN|FAIL|MAINT|RESERVED|UNKNOWN|REBOOT|COMPLETING|"
@@ -917,10 +918,26 @@ def parse_history(output: str) -> tuple[list[UserJob], str | None]:
     return jobs, history_error
 
 
+def ssh_authentication_required(error: BaseException) -> bool:
+    if not isinstance(error, subprocess.CalledProcessError):
+        return False
+    stderr = error.stderr or ""
+    return bool(
+        re.search(
+            r"permission denied|authentication failed|"
+            r"no supported authentication methods|too many authentication failures",
+            stderr,
+            re.IGNORECASE,
+        )
+    )
+
+
 def ssh_error_message(error: BaseException) -> str:
     if isinstance(error, subprocess.TimeoutExpired):
         timeout = f"{error.timeout:g}" if error.timeout is not None else "?"
         return f"request timed out after {timeout}s"
+    if ssh_authentication_required(error):
+        return "authentication required"
     if isinstance(error, subprocess.CalledProcessError):
         if error.stderr:
             return error.stderr.strip().splitlines()[0]
@@ -961,6 +978,7 @@ def cluster_user(cluster_config: ClusterConfig, user_override: str | None) -> st
 
 
 def run_ssh(
+    cluster_config: ClusterConfig,
     hostname: str,
     ssh_user: str,
     remote_command: str,
@@ -982,6 +1000,7 @@ def run_ssh(
             "ServerAliveCountMax=1",
             "-o",
             "LogLevel=ERROR",
+            *multiplex_options(cluster_config),
             hostname,
             remote_command,
         ],
@@ -1077,6 +1096,7 @@ def run_endpoint(
     if cluster_config.mode == "local":
         return run_local(command, command_timeout)
     return run_ssh(
+        cluster_config,
         endpoint,
         ssh_user,
         command,
@@ -1272,6 +1292,7 @@ def probe_endpoint(
         return LoginNode(
             hostname=endpoint,
             checked=True,
+            auth_required=ssh_authentication_required(error),
             error=ssh_error_message(error),
         )
 
@@ -1299,6 +1320,7 @@ def fetch_cluster(
     login_status = {hostname: LoginNode(hostname=hostname) for hostname in endpoints}
     cluster: Cluster | None = None
     last_error = "no login nodes configured"
+    auth_required = False
 
     for hostname in ordered_hosts:
         for attempt in range(settings.retries_per_address + 1):
@@ -1321,10 +1343,13 @@ def fetch_cluster(
                 )
                 break
             except (OSError, RuntimeError, subprocess.SubprocessError) as error:
+                endpoint_auth_required = ssh_authentication_required(error)
+                auth_required = auth_required or endpoint_auth_required
                 last_error = ssh_error_message(error)
                 login_status[hostname] = LoginNode(
                     hostname=hostname,
                     checked=True,
+                    auth_required=endpoint_auth_required,
                     error=last_error,
                 )
                 if attempt < settings.retries_per_address:
@@ -1352,6 +1377,7 @@ def fetch_cluster(
             focus=cluster_config.focus,
             filesystem_paths=tuple(cluster_config.filesystems),
             login_nodes=statuses,
+            auth_required=auth_required,
             error=last_error,
         )
     cluster.login_nodes = statuses
@@ -1490,6 +1516,7 @@ def merge_cluster_refresh(
                         checked=old_login.checked,
                         reachable=old_login.reachable,
                         used=login.hostname == refreshed.host,
+                        auth_required=old_login.auth_required,
                         error=old_login.error,
                     )
                 )

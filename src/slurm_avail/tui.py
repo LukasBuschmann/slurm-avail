@@ -11,6 +11,7 @@ import time
 from pathlib import Path
 
 from .collect import (
+    cluster_user,
     merge_cluster_refresh,
     submit_cluster_refreshes,
     submit_estimate_requests,
@@ -18,6 +19,8 @@ from .collect import (
 from .config import (
     SETTING_FIELDS,
     AppConfig,
+    ClusterConfig,
+    DashboardSettings,
     load_config,
     save_config,
     validate_config,
@@ -69,6 +72,7 @@ from .node_views import (
     login_table,
 )
 from .output import placeholder_clusters
+from .ssh_auth import open_interactive_session
 from .text import clipped_line, tab_line, visible_length
 
 
@@ -215,6 +219,48 @@ def draw_fixed_legend(
             screen_width,
             styles,
         )
+
+
+def connect_cluster_with_terminal(
+    screen: curses.window,
+    cluster_config: ClusterConfig,
+    settings: DashboardSettings,
+    user_override: str | None,
+) -> tuple[int, int]:
+    """Suspend curses while OpenSSH reads credentials from the terminal."""
+    ssh_user = cluster_user(cluster_config, user_override)
+    connected = 0
+    total = len(cluster_config.addresses)
+    with contextlib.suppress(curses.error):
+        curses.def_prog_mode()
+    with contextlib.suppress(curses.error):
+        curses.endwin()
+    try:
+        for index, endpoint in enumerate(cluster_config.addresses, start=1):
+            print(
+                f"slurm-avail: connecting {cluster_config.name} "
+                f"endpoint {index}/{total}: {endpoint}",
+                flush=True,
+            )
+            result = open_interactive_session(
+                cluster_config,
+                endpoint,
+                ssh_user,
+                settings,
+            )
+            if result.connected:
+                connected += 1
+            elif result.message:
+                print(f"slurm-avail: {endpoint}: {result.message}", flush=True)
+    finally:
+        with contextlib.suppress(curses.error):
+            curses.reset_prog_mode()
+        screen.timeout(200)
+        screen.keypad(True)
+        with contextlib.suppress(curses.error):
+            screen.clear()
+            screen.refresh()
+    return connected, total
 
 
 def dashboard(
@@ -1392,6 +1438,52 @@ def dashboard(
                             config_message = f"Changed {edited.name}; press s to apply"
                         except ValueError as error:
                             config_message = str(error)
+            elif active_view == "config" and key in (ord("c"), ord("C")):
+                cluster_index = config_selection - len(SETTING_FIELDS)
+                if cluster_index < 0:
+                    config_message = "Select a cluster card to connect"
+                elif config_dirty:
+                    config_message = "Save configuration changes before connecting"
+                else:
+                    cluster_config = runtime_config.clusters[cluster_index]
+                    if cluster_config.mode != "ssh":
+                        config_message = f"{cluster_config.name} runs locally"
+                    elif cluster_config.authentication != "interactive":
+                        config_message = (
+                            "Set authentication to interactive, then save and connect"
+                        )
+                    else:
+                        connected, total = connect_cluster_with_terminal(
+                            screen,
+                            cluster_config,
+                            runtime_config.settings,
+                            user_override,
+                        )
+                        if connected == total:
+                            config_message = (
+                                f"Connected {cluster_config.name}: "
+                                f"{connected}/{total} endpoints"
+                            )
+                        elif connected:
+                            config_message = (
+                                f"Connected {cluster_config.name}: "
+                                f"{connected}/{total}; "
+                                "failover is incomplete"
+                            )
+                        else:
+                            config_message = (
+                                f"Could not authenticate {cluster_config.name}"
+                            )
+                        if connected:
+                            for future in refresh_futures:
+                                future.cancel()
+                            refresh_futures.clear()
+                            next_node_refresh = 0.0
+                            next_filesystem_refresh = 0.0
+                            next_login_refresh = 0.0
+                            next_jobs_refresh = 0.0
+                            next_history_refresh = 0.0
+                            next_forecast_refresh = 0.0
             elif active_view == "config" and key in (ord("h"), ord("H")):
                 cluster_index = config_selection - len(SETTING_FIELDS)
                 if cluster_index < 0:

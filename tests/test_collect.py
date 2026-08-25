@@ -13,6 +13,7 @@ from slurm_avail.collect import (
     parse_memory_mb,
     parse_nodes,
     parse_schedule,
+    ssh_authentication_required,
     ssh_error_message,
 )
 from slurm_avail.config import ClusterConfig, DashboardSettings
@@ -31,6 +32,17 @@ def test_ssh_error_without_stderr_does_not_expose_command() -> None:
     error = subprocess.CalledProcessError(255, ["ssh", "private-login.example"])
 
     assert ssh_error_message(error) == "request failed"
+
+
+def test_ssh_authentication_failure_gets_a_safe_state() -> None:
+    error = subprocess.CalledProcessError(
+        255,
+        ["ssh", "private-login.example"],
+        stderr="researcher@login: Permission denied (publickey,password).\n",
+    )
+
+    assert ssh_authentication_required(error)
+    assert ssh_error_message(error) == "authentication required"
 
 
 def test_parse_filesystem_posix_kilobytes() -> None:

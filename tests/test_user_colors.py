@@ -247,3 +247,19 @@ def test_down_cluster_views_do_not_expose_transport_error() -> None:
     assert "UNAVAILABLE" not in header_text
     assert error not in header_text
     assert body_text == "CLUSTER DOWN"
+
+
+def test_authentication_required_is_distinct_from_cluster_down() -> None:
+    cluster = Cluster(
+        name="GPU",
+        host="login",
+        auth_required=True,
+        error="authentication required",
+    )
+
+    header = cluster_header(cluster)
+    header_text = "\n".join("".join(value for value, _style in row) for row in header)
+    styles = [style for row in header for _value, style in row]
+
+    assert "AUTH REQUIRED" in header_text
+    assert "reserved" in styles

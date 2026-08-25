@@ -32,7 +32,8 @@ user-exclusive, drained, and down remain visible in the same view.
 configured on each cluster.
 
 **Login Nodes** shows which SSH endpoints are reachable, which endpoint is
-currently supplying data, and whether automatic failover is available.
+currently supplying data, and whether automatic failover is available. It also
+distinguishes an unreachable host from an endpoint that needs authentication.
 
 **Jobs** combines the current user's live queue with recent accounting history.
 Its default All scope lists jobs from every configured cluster; numbered
@@ -68,7 +69,8 @@ does not speculate about when pending jobs will start.
 Clusters can use local or SSH collection, multiple login endpoints, CPU or GPU
 focused layouts, custom Slurm locations, and selected filesystem paths. They
 can also be hidden or reordered, while refresh and retry intervals are shared
-dashboard settings. Everything is persisted in a readable TOML file.
+dashboard settings. SSH clusters can use non-interactive keys or a temporary
+interactive OpenSSH session. Everything is persisted in a readable TOML file.
 
 ## Installation
 
@@ -148,6 +150,8 @@ name = "CAPELLA"
 mode = "ssh"
 addresses = ["login1.capella.hpc.tu-dresden.de", "login2.capella.hpc.tu-dresden.de"]
 user = "USERNAME"
+authentication = "batch"
+control_persist_seconds = 3600
 focus = "gpu"
 hidden = false
 filesystems = ["/home", "/software", "/data/horse", "/data/walrus", "/data/narwhal", "/data/quokka", "/data/cat"]
@@ -159,6 +163,8 @@ name = "ALPHA"
 mode = "ssh"
 addresses = ["login1.alpha.hpc.tu-dresden.de", "login2.alpha.hpc.tu-dresden.de"]
 user = "USERNAME"
+authentication = "batch"
+control_persist_seconds = 3600
 focus = "gpu"
 hidden = false
 filesystems = ["/home", "/software", "/data/horse", "/data/walrus", "/data/narwhal", "/data/quokka", "/data/cat"]
@@ -170,6 +176,8 @@ name = "BARNARD"
 mode = "ssh"
 addresses = ["login1.barnard.hpc.tu-dresden.de", "login2.barnard.hpc.tu-dresden.de"]
 user = "USERNAME"
+authentication = "batch"
+control_persist_seconds = 3600
 focus = "cpu"
 hidden = false
 filesystems = ["/home", "/software", "/data/horse", "/data/walrus", "/data/narwhal", "/data/quokka", "/data/cat"]
@@ -181,6 +189,8 @@ name = "ROMEO"
 mode = "ssh"
 addresses = ["login1.romeo.hpc.tu-dresden.de", "login2.romeo.hpc.tu-dresden.de"]
 user = "USERNAME"
+authentication = "batch"
+control_persist_seconds = 3600
 focus = "cpu"
 hidden = false
 filesystems = ["/home", "/software", "/data/horse", "/data/walrus", "/data/narwhal", "/data/quokka", "/data/cat"]
@@ -194,6 +204,28 @@ For a smaller generic example, see [config.example.toml](config.example.toml).
 The `user` field is optional; when omitted, OpenSSH configuration determines
 the user. The Slurm path is also optional when `scontrol` and `squeue` are
 already available on the endpoint's `PATH`.
+
+### Interactive SSH authentication
+
+SSH keys and agents use the default `batch` authentication mode. To use a
+password, keyboard-interactive login, or MFA without storing a credential in
+`slurm-avail`, configure the cluster with:
+
+```toml
+authentication = "interactive"
+control_persist_seconds = 3600
+```
+
+Save the configuration, select the cluster card in Config, and press `c`.
+`slurm-avail` temporarily returns control of the terminal to OpenSSH. OpenSSH
+handles the password, MFA, and host-key prompts directly, then keeps an
+authenticated connection open for the configured number of seconds. Each
+login endpoint has its own connection, so a two-endpoint cluster may prompt
+twice. Dashboard refreshes reuse those connections.
+
+The password never enters the TOML file, Python process, command arguments, or
+application output. Control sockets live in a private per-user directory. The
+dashboard leaves normal OpenSSH host-key verification enabled.
 
 A different configuration file can be selected with:
 
@@ -221,7 +253,7 @@ slurm-avail --config /path/to/config.toml
 
 The Config view shows its editing controls in the legend. In particular, use
 `a` to add, `Enter` to edit, `h` to hide or show, `Shift+Up/Down` to reorder,
-and `s` to save clusters.
+`c` to authenticate an interactive SSH cluster, and `s` to save clusters.
 
 ## Requirements
 
@@ -246,9 +278,10 @@ On each configured cluster endpoint:
   `sort`, `sed`, and `grep`
 - `df` and `tail` for filesystem monitoring (`timeout` is used when present)
 
-SSH authentication must already work non-interactively, normally through an
-SSH agent, keys, and `~/.ssh/config`. `slurm-avail` does not store passwords or
-private keys.
+The default `batch` authentication mode must work non-interactively, normally
+through an SSH agent, keys, and `~/.ssh/config`. The optional `interactive`
+mode lets OpenSSH ask for a password or MFA and cache an authenticated
+connection. `slurm-avail` does not read or store passwords or private keys.
 
 ## Command-line usage
 
