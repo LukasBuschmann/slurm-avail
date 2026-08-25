@@ -74,6 +74,40 @@ for a password. Everything is persisted in a readable TOML file.
 
 ## Installation
 
+### Standalone Linux executable
+
+On Linux x86-64, download the standalone executable. It does not require
+Python, `uv`, or pip:
+
+```console
+curl -fL \
+  https://github.com/LukasBuschmann/slurm-avail/releases/latest/download/slurm-avail-linux-x86_64 \
+  -o slurm-avail-linux-x86_64
+install -Dm755 slurm-avail-linux-x86_64 ~/.local/bin/slurm-avail
+slurm-avail
+```
+
+The matching `slurm-avail-linux-x86_64.sha256` file is attached to each
+GitHub release.
+
+### Build the Linux executable from source
+
+Building requires Git, Python 3.11 or newer, and Python's `venv` module:
+
+```console
+git clone https://github.com/LukasBuschmann/slurm-avail.git
+cd slurm-avail
+python3 -m venv .venv
+.venv/bin/python -m pip install '.[binary]'
+.venv/bin/pyinstaller --clean --noconfirm slurm-avail.spec
+./dist/slurm-avail --version
+```
+
+The standalone executable is written to `dist/slurm-avail`. It can be copied
+to `~/.local/bin` or another directory on `PATH`.
+
+### Python package
+
 Install from PyPI with [`uv`](https://docs.astral.sh/uv/):
 
 ```console
@@ -271,7 +305,8 @@ You can press `s` from any field without stepping through the rest of the form.
 
 On the computer running `slurm-avail`:
 
-- Python 3.11 or newer
+- Python 3.11 or newer for PyPI and source installations. The standalone Linux
+  executable does not require Python.
 - a curses-capable POSIX terminal
 - OpenSSH's `ssh` command for remote clusters
 

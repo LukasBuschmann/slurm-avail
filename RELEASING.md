@@ -21,5 +21,20 @@ the repository does not need to contain a PyPI password or API token.
 3. Commit the version change and create a GitHub release tagged `vX.Y.Z`.
 
 Publishing the GitHub release starts `.github/workflows/release.yml`. It builds
-both the source distribution and wheel, then publishes them to PyPI after the
-`pypi` environment has approved the job.
+the source distribution, wheel, and standalone Linux x86-64 executable. The
+workflow publishes the Python distributions to PyPI after the `pypi`
+environment has approved the job. It attaches the executable and its SHA-256
+checksum to the GitHub release.
+
+## Rebuild Linux release assets
+
+The Linux executable can be rebuilt and attached without publishing to PyPI
+again. Open **Actions > Publish release > Run workflow** and enter the existing
+release tag, or run:
+
+```console
+gh workflow run release.yml -f release_tag=vX.Y.Z
+```
+
+Manual runs build the executable from the current default branch and replace
+the two Linux assets on the selected release.

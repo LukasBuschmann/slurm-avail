@@ -1,14 +1,21 @@
-name: Publish Python package
+name: Publish release
 
 on:
   release:
     types: [published]
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: GitHub release tag that receives the Linux executable
+        required: true
+        type: string
 
 permissions:
   contents: read
 
 jobs:
   build:
+    if: github.event_name == 'release'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
@@ -26,6 +33,7 @@ jobs:
           path: dist/
 
   publish:
+    if: github.event_name == 'release'
     needs: build
     runs-on: ubuntu-latest
     environment:
@@ -41,3 +49,51 @@ jobs:
           path: dist/
       - name: Publish to PyPI
         uses: pypa/gh-action-pypi-publish@release/v1
+
+  linux-binary:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.11"
+      - name: Install binary build dependencies
+        run: python -m pip install '.[binary]'
+      - name: Build Linux executable
+        run: pyinstaller --clean --noconfirm slurm-avail.spec
+      - name: Prepare release assets
+        run: |
+          mv dist/slurm-avail dist/slurm-avail-linux-x86_64
+          cd dist
+          sha256sum slurm-avail-linux-x86_64 > slurm-avail-linux-x86_64.sha256
+      - name: Smoke test executable
+        run: dist/slurm-avail-linux-x86_64 --version
+      - name: Upload executable artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: linux-release-assets
+          path: |
+            dist/slurm-avail-linux-x86_64
+            dist/slurm-avail-linux-x86_64.sha256
+
+  attach-linux-binary:
+    needs: linux-binary
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download executable artifact
+        uses: actions/download-artifact@v8
+        with:
+          name: linux-release-assets
+          path: release-assets
+      - name: Attach executable to GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ github.event.release.tag_name || inputs.release_tag }}
+        run: >-
+          gh release upload "$RELEASE_TAG"
+          release-assets/slurm-avail-linux-x86_64
+          release-assets/slurm-avail-linux-x86_64.sha256
+          --clobber
+          --repo "${{ github.repository }}"

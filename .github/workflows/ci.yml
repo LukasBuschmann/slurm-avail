@@ -40,3 +40,22 @@ jobs:
         run: |
           python -m pip install build
           python -m build
+
+  linux-binary:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.11"
+      - name: Install binary build dependencies
+        run: python -m pip install '.[binary]'
+      - name: Build Linux executable
+        run: pyinstaller --clean --noconfirm slurm-avail.spec
+      - name: Smoke test executable
+        run: dist/slurm-avail --version
+      - name: Upload executable
+        uses: actions/upload-artifact@v7
+        with:
+          name: slurm-avail-linux-x86_64
+          path: dist/slurm-avail
