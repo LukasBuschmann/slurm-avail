@@ -17,6 +17,8 @@ from .collect import (
     submit_estimate_requests,
 )
 from .config import (
+    BOOLEAN_SETTING_FIELDS,
+    SETTING_COUNT,
     SETTING_FIELDS,
     AppConfig,
     ClusterConfig,
@@ -26,11 +28,16 @@ from .config import (
     validate_config,
 )
 from .config_views import (
+    cluster_editor_legend_lines,
+    cluster_editor_table,
+    cluster_field_input,
     config_legend_lines,
     config_table,
     confirm_prompt,
-    edit_cluster_dialog,
+    cycle_cluster_field,
     prompt_text,
+    set_cluster_field,
+    visible_cluster_fields,
 )
 from .constants import (
     CLUSTER_WIDTH,
@@ -72,7 +79,12 @@ from .node_views import (
     login_table,
 )
 from .output import placeholder_clusters
-from .ssh_auth import open_interactive_session
+from .processes import cancel_active_commands, reset_command_cancellation
+from .ssh_auth import (
+    SshControlTarget,
+    close_control_sessions,
+    open_interactive_session,
+)
 from .text import clipped_line, tab_line, visible_length
 
 
@@ -226,22 +238,37 @@ def connect_cluster_with_terminal(
     cluster_config: ClusterConfig,
     settings: DashboardSettings,
     user_override: str | None,
-) -> tuple[int, int]:
-    """Suspend curses while OpenSSH reads credentials from the terminal."""
+) -> tuple[int, int, set[SshControlTarget], bool]:
+    """Connect one cluster endpoint while OpenSSH reads from the terminal."""
     ssh_user = cluster_user(cluster_config, user_override)
     connected = 0
-    total = len(cluster_config.addresses)
+    endpoint_count = len(cluster_config.addresses)
+    attempted = 0
+    targets: set[SshControlTarget] = set()
+    cancelled = False
     with contextlib.suppress(curses.error):
         curses.def_prog_mode()
     with contextlib.suppress(curses.error):
         curses.endwin()
     try:
+        print("Authentication is handled directly by OpenSSH.", flush=True)
+        print("slurm-avail does not read, handle, or store your password.", flush=True)
+        print(
+            "Hint: disable automatic login on startup under "
+            "Config > Startup authentication.",
+            flush=True,
+        )
+        print("Press Ctrl-C to cancel authentication.", flush=True)
+        print("", flush=True)
         for index, endpoint in enumerate(cluster_config.addresses, start=1):
+            attempted = index
             print(
-                f"slurm-avail: connecting {cluster_config.name} "
-                f"endpoint {index}/{total}: {endpoint}",
+                f"slurm-avail: authentication attempt {index}/{endpoint_count} "
+                f"for {cluster_config.name}",
                 flush=True,
             )
+            print(f"server  {endpoint}", flush=True)
+            print(f"user    {ssh_user}", flush=True)
             result = open_interactive_session(
                 cluster_config,
                 endpoint,
@@ -250,17 +277,53 @@ def connect_cluster_with_terminal(
             )
             if result.connected:
                 connected += 1
+                targets.add(SshControlTarget(endpoint, ssh_user))
+                break
             elif result.message:
                 print(f"slurm-avail: {endpoint}: {result.message}", flush=True)
+                if result.message == "cancelled":
+                    cancelled = True
+                    break
+                if result.message != "unavailable":
+                    break
     finally:
         with contextlib.suppress(curses.error):
             curses.reset_prog_mode()
+            curses.noecho()
+            curses.cbreak()
+            curses.curs_set(0)
         screen.timeout(200)
         screen.keypad(True)
         with contextlib.suppress(curses.error):
+            screen.touchwin()
             screen.clear()
             screen.refresh()
-    return connected, total
+    return connected, attempted, targets, cancelled
+
+
+def configured_control_targets(
+    config: AppConfig,
+    user_override: str | None,
+) -> set[SshControlTarget]:
+    """Return every OpenSSH master the current configuration may reuse."""
+    return {
+        SshControlTarget(endpoint, user_override or cluster.user)
+        for cluster in config.clusters
+        if cluster.mode == "ssh" and cluster.authentication == "interactive"
+        for endpoint in cluster.addresses
+    }
+
+
+def startup_authentication_clusters(config: AppConfig) -> list[ClusterConfig]:
+    if not config.settings.authenticate_on_startup:
+        return []
+    return [
+        cluster
+        for cluster in config.clusters
+        if not cluster.hidden
+        and cluster.mode == "ssh"
+        and cluster.authentication == "interactive"
+    ]
 
 
 def dashboard(
@@ -283,6 +346,8 @@ def dashboard(
     config_dirty = False
     config_message = ""
     config_selection = 0
+    config_editing_cluster: int | None = None
+    config_field_selection = 0
     config_generation = 0
     clusters = placeholder_clusters(runtime_config, user_override)
     last_node_refresh: float | None = None
@@ -316,6 +381,39 @@ def dashboard(
     forecast_resolution_index = FORECAST_RESOLUTIONS.index(60)
     vertical_offsets = {view: 0 for view in VIEWS}
     horizontal_offsets = {view: 0 for view in VIEWS}
+    control_targets = configured_control_targets(runtime_config, user_override)
+
+    reset_command_cancellation()
+    startup_clusters = startup_authentication_clusters(runtime_config)
+    if startup_clusters:
+        startup_connected = 0
+        startup_total = len(startup_clusters)
+        startup_cancelled = False
+        for cluster_config in startup_clusters:
+            connected, _attempted, connected_targets, cancelled = (
+                connect_cluster_with_terminal(
+                    screen,
+                    cluster_config,
+                    runtime_config.settings,
+                    user_override,
+                )
+            )
+            startup_connected += connected
+            control_targets.update(connected_targets)
+            if cancelled:
+                startup_cancelled = True
+                break
+        if startup_total:
+            if startup_cancelled:
+                config_message = (
+                    f"Startup authentication cancelled after "
+                    f"{startup_connected}/{startup_total} clusters"
+                )
+            else:
+                config_message = (
+                    f"Startup authentication: "
+                    f"{startup_connected}/{startup_total} clusters connected"
+                )
 
     executor = concurrent.futures.ThreadPoolExecutor(max_workers=32)
     refresh_includes_filesystems = True
@@ -1045,16 +1143,33 @@ def dashboard(
                 )
 
             else:
-                selection_count = len(SETTING_FIELDS) + len(editable_config.clusters)
-                config_selection = min(max(0, config_selection), selection_count - 1)
-                headers, body, selected_body_index = config_table(
-                    editable_config,
-                    config_path,
-                    config_selection,
-                    config_dirty,
-                    config_message,
-                )
-                legend = config_legend_lines(config_dirty)
+                if config_editing_cluster is None:
+                    selection_count = SETTING_COUNT + len(editable_config.clusters)
+                    config_selection = min(
+                        max(0, config_selection), selection_count - 1
+                    )
+                    headers, body, selected_body_index = config_table(
+                        editable_config,
+                        config_path,
+                        config_selection,
+                        config_dirty,
+                        config_message,
+                    )
+                    legend = config_legend_lines(config_dirty)
+                else:
+                    editing_cluster = editable_config.clusters[config_editing_cluster]
+                    field_count = len(visible_cluster_fields(editing_cluster))
+                    config_field_selection = min(
+                        max(0, config_field_selection), field_count - 1
+                    )
+                    headers, body, selected_body_index = cluster_editor_table(
+                        editing_cluster,
+                        config_path,
+                        config_field_selection,
+                        config_dirty,
+                        config_message,
+                    )
+                    legend = cluster_editor_legend_lines(config_dirty)
                 header_height = len(headers)
                 body_height = max(1, viewport_height - header_height)
                 max_vertical = max(0, len(body) - body_height)
@@ -1354,11 +1469,154 @@ def dashboard(
                         * old_resolution
                         / new_resolution
                     )
-            elif active_view == "config" and key in (
-                curses.KEY_SR,
-                curses.KEY_SF,
+            elif (
+                active_view == "config"
+                and config_editing_cluster is not None
+                and key == 27
             ):
-                cluster_index = config_selection - len(SETTING_FIELDS)
+                config_selection = SETTING_COUNT + config_editing_cluster
+                config_editing_cluster = None
+                config_message = "Returned to cluster list"
+            elif (
+                active_view == "config"
+                and config_editing_cluster is not None
+                and key == curses.KEY_UP
+            ):
+                config_field_selection -= 1
+            elif (
+                active_view == "config"
+                and config_editing_cluster is not None
+                and key == curses.KEY_DOWN
+            ):
+                config_field_selection += 1
+            elif (
+                active_view == "config"
+                and config_editing_cluster is not None
+                and key == curses.KEY_PPAGE
+            ):
+                config_field_selection -= max(1, page_height - 1)
+            elif (
+                active_view == "config"
+                and config_editing_cluster is not None
+                and key == curses.KEY_NPAGE
+            ):
+                config_field_selection += max(1, page_height - 1)
+            elif (
+                active_view == "config"
+                and config_editing_cluster is not None
+                and key == curses.KEY_HOME
+            ):
+                config_field_selection = 0
+            elif (
+                active_view == "config"
+                and config_editing_cluster is not None
+                and key == curses.KEY_END
+            ):
+                config_field_selection = (
+                    len(
+                        visible_cluster_fields(
+                            editable_config.clusters[config_editing_cluster]
+                        )
+                    )
+                    - 1
+                )
+            elif (
+                active_view == "config"
+                and config_editing_cluster is not None
+                and key in (curses.KEY_LEFT, curses.KEY_RIGHT)
+            ):
+                cluster = editable_config.clusters[config_editing_cluster]
+                field = visible_cluster_fields(cluster)[config_field_selection]
+                if field.kind == "choice":
+                    direction = -1 if key == curses.KEY_LEFT else 1
+                    cycle_cluster_field(cluster, field, direction)
+                    config_dirty = True
+                    config_message = f"Changed {field.label}; press s to apply"
+            elif (
+                active_view == "config"
+                and config_editing_cluster is not None
+                and key in (10, 13, curses.KEY_ENTER, ord(" "))
+            ):
+                cluster = editable_config.clusters[config_editing_cluster]
+                field = visible_cluster_fields(cluster)[config_field_selection]
+                if field.kind == "choice":
+                    cycle_cluster_field(cluster, field, 1)
+                    config_dirty = True
+                    config_message = f"Changed {field.label}; press s to apply"
+                elif key != ord(" "):
+                    entered = prompt_text(
+                        screen,
+                        field.prompt,
+                        cluster_field_input(cluster, field),
+                        styles,
+                    )
+                    if entered is not None:
+                        try:
+                            set_cluster_field(cluster, field, entered)
+                            config_dirty = True
+                            config_message = f"Changed {field.label}; press s to apply"
+                        except ValueError as error:
+                            config_message = str(error)
+            elif (
+                active_view == "config"
+                and config_editing_cluster is not None
+                and key in (ord("e"), ord("E"))
+            ):
+                cluster = editable_config.clusters[config_editing_cluster]
+                field = visible_cluster_fields(cluster)[config_field_selection]
+                if field.kind == "choice":
+                    config_message = "Use Left/Right, Space, or Enter for this field"
+                else:
+                    entered = prompt_text(
+                        screen,
+                        field.prompt,
+                        cluster_field_input(cluster, field),
+                        styles,
+                    )
+                    if entered is not None:
+                        try:
+                            set_cluster_field(cluster, field, entered)
+                            config_dirty = True
+                            config_message = f"Changed {field.label}; press s to apply"
+                        except ValueError as error:
+                            config_message = str(error)
+            elif (
+                active_view == "config"
+                and config_editing_cluster is None
+                and len(SETTING_FIELDS) <= config_selection < SETTING_COUNT
+                and key
+                in (
+                    curses.KEY_LEFT,
+                    curses.KEY_RIGHT,
+                    ord(" "),
+                    10,
+                    13,
+                    curses.KEY_ENTER,
+                )
+            ):
+                boolean_index = config_selection - len(SETTING_FIELDS)
+                key_name, label = BOOLEAN_SETTING_FIELDS[boolean_index]
+                current = getattr(editable_config.settings, key_name)
+                if key == curses.KEY_LEFT:
+                    value = False
+                elif key == curses.KEY_RIGHT:
+                    value = True
+                else:
+                    value = not current
+                if value != current:
+                    setattr(editable_config.settings, key_name, value)
+                    config_dirty = True
+                    config_message = f"Changed {label}; press s to apply"
+            elif (
+                active_view == "config"
+                and config_editing_cluster is None
+                and key
+                in (
+                    curses.KEY_SR,
+                    curses.KEY_SF,
+                )
+            ):
+                cluster_index = config_selection - SETTING_COUNT
                 if cluster_index < 0:
                     config_message = "Select a cluster card to move"
                 else:
@@ -1376,32 +1634,52 @@ def dashboard(
                             clusters_to_order[new_index],
                             clusters_to_order[cluster_index],
                         )
-                        config_selection = len(SETTING_FIELDS) + new_index
+                        config_selection = SETTING_COUNT + new_index
                         config_dirty = True
                         config_message = (
                             f"Moved {clusters_to_order[new_index].name}; "
                             "press s to apply"
                         )
-            elif active_view == "config" and key == curses.KEY_UP:
+            elif (
+                active_view == "config"
+                and config_editing_cluster is None
+                and key == curses.KEY_UP
+            ):
                 config_selection -= 1
-            elif active_view == "config" and key == curses.KEY_DOWN:
+            elif (
+                active_view == "config"
+                and config_editing_cluster is None
+                and key == curses.KEY_DOWN
+            ):
                 config_selection += 1
-            elif active_view == "config" and key == curses.KEY_PPAGE:
+            elif (
+                active_view == "config"
+                and config_editing_cluster is None
+                and key == curses.KEY_PPAGE
+            ):
                 config_selection -= max(1, page_height - 1)
-            elif active_view == "config" and key == curses.KEY_NPAGE:
+            elif (
+                active_view == "config"
+                and config_editing_cluster is None
+                and key == curses.KEY_NPAGE
+            ):
                 config_selection += max(1, page_height - 1)
-            elif active_view == "config" and key == curses.KEY_HOME:
+            elif (
+                active_view == "config"
+                and config_editing_cluster is None
+                and key == curses.KEY_HOME
+            ):
                 config_selection = 0
-            elif active_view == "config" and key == curses.KEY_END:
-                config_selection = (
-                    len(SETTING_FIELDS) + len(editable_config.clusters) - 1
-                )
-            elif active_view == "config" and key in (
-                10,
-                13,
-                curses.KEY_ENTER,
-                ord("e"),
-                ord("E"),
+            elif (
+                active_view == "config"
+                and config_editing_cluster is None
+                and key == curses.KEY_END
+            ):
+                config_selection = SETTING_COUNT + len(editable_config.clusters) - 1
+            elif (
+                active_view == "config"
+                and config_editing_cluster is None
+                and key in (10, 13, curses.KEY_ENTER, ord("e"), ord("E"))
             ):
                 if config_selection < len(SETTING_FIELDS):
                     key_name, label, minimum, maximum = SETTING_FIELDS[config_selection]
@@ -1421,25 +1699,19 @@ def dashboard(
                             config_message = f"Changed {label}; press s to apply"
                         except ValueError:
                             config_message = f"{label} must be {minimum}-{maximum}"
+                elif config_selection < SETTING_COUNT:
+                    config_message = "Use Left/Right, Space, or Enter for this setting"
                 else:
-                    cluster_index = config_selection - len(SETTING_FIELDS)
-                    edited = edit_cluster_dialog(
-                        screen,
-                        styles,
-                        editable_config.clusters[cluster_index],
-                    )
-                    if edited is not None:
-                        candidate = copy.deepcopy(editable_config)
-                        candidate.clusters[cluster_index] = edited
-                        try:
-                            validate_config(candidate)
-                            editable_config = candidate
-                            config_dirty = True
-                            config_message = f"Changed {edited.name}; press s to apply"
-                        except ValueError as error:
-                            config_message = str(error)
-            elif active_view == "config" and key in (ord("c"), ord("C")):
-                cluster_index = config_selection - len(SETTING_FIELDS)
+                    cluster_index = config_selection - SETTING_COUNT
+                    config_editing_cluster = cluster_index
+                    config_field_selection = 0
+                    config_message = "Select any field; press s whenever ready"
+            elif (
+                active_view == "config"
+                and config_editing_cluster is None
+                and key in (ord("c"), ord("C"))
+            ):
+                cluster_index = config_selection - SETTING_COUNT
                 if cluster_index < 0:
                     config_message = "Select a cluster card to connect"
                 elif config_dirty:
@@ -1449,30 +1721,26 @@ def dashboard(
                     if cluster_config.mode != "ssh":
                         config_message = f"{cluster_config.name} runs locally"
                     elif cluster_config.authentication != "interactive":
-                        config_message = (
-                            "Set authentication to interactive, then save and connect"
-                        )
+                        config_message = "Choose Password, then save and connect"
                     else:
-                        connected, total = connect_cluster_with_terminal(
-                            screen,
-                            cluster_config,
-                            runtime_config.settings,
-                            user_override,
-                        )
-                        if connected == total:
-                            config_message = (
-                                f"Connected {cluster_config.name}: "
-                                f"{connected}/{total} endpoints"
+                        connected, attempted, connected_targets, _cancelled = (
+                            connect_cluster_with_terminal(
+                                screen,
+                                cluster_config,
+                                runtime_config.settings,
+                                user_override,
                             )
-                        elif connected:
+                        )
+                        control_targets.update(connected_targets)
+                        if connected:
+                            endpoint = next(iter(connected_targets)).endpoint
                             config_message = (
-                                f"Connected {cluster_config.name}: "
-                                f"{connected}/{total}; "
-                                "failover is incomplete"
+                                f"Connected {cluster_config.name} via {endpoint}"
                             )
                         else:
                             config_message = (
-                                f"Could not authenticate {cluster_config.name}"
+                                f"Could not authenticate {cluster_config.name} "
+                                f"using {attempted} endpoint(s)"
                             )
                         if connected:
                             for future in refresh_futures:
@@ -1484,8 +1752,12 @@ def dashboard(
                             next_jobs_refresh = 0.0
                             next_history_refresh = 0.0
                             next_forecast_refresh = 0.0
-            elif active_view == "config" and key in (ord("h"), ord("H")):
-                cluster_index = config_selection - len(SETTING_FIELDS)
+            elif (
+                active_view == "config"
+                and config_editing_cluster is None
+                and key in (ord("h"), ord("H"))
+            ):
+                cluster_index = config_selection - SETTING_COUNT
                 if cluster_index < 0:
                     config_message = "Select a cluster card to hide or show"
                 else:
@@ -1500,23 +1772,33 @@ def dashboard(
                         config_message = f"{state} {cluster.name}; press s to apply"
                     except ValueError as error:
                         config_message = str(error)
-            elif active_view == "config" and key in (ord("a"), ord("A")):
-                added = edit_cluster_dialog(screen, styles, None)
-                if added is not None:
-                    candidate = copy.deepcopy(editable_config)
-                    candidate.clusters.append(added)
-                    try:
-                        validate_config(candidate)
-                        editable_config = candidate
-                        config_selection = (
-                            len(SETTING_FIELDS) + len(editable_config.clusters) - 1
-                        )
-                        config_dirty = True
-                        config_message = f"Added {added.name}; press s to apply"
-                    except ValueError as error:
-                        config_message = str(error)
-            elif active_view == "config" and key in (ord("d"), ord("D")):
-                cluster_index = config_selection - len(SETTING_FIELDS)
+            elif (
+                active_view == "config"
+                and config_editing_cluster is None
+                and key in (ord("a"), ord("A"))
+            ):
+                names = {
+                    cluster.name.casefold() for cluster in editable_config.clusters
+                }
+                suffix = 1
+                name = "NEW CLUSTER"
+                while name.casefold() in names:
+                    suffix += 1
+                    name = f"NEW CLUSTER {suffix}"
+                editable_config.clusters.append(
+                    ClusterConfig(name=name, mode="local", focus="auto")
+                )
+                config_editing_cluster = len(editable_config.clusters) - 1
+                config_selection = SETTING_COUNT + config_editing_cluster
+                config_field_selection = 0
+                config_dirty = True
+                config_message = "New local cluster; select Connection for SSH"
+            elif (
+                active_view == "config"
+                and config_editing_cluster is None
+                and key in (ord("d"), ord("D"))
+            ):
+                cluster_index = config_selection - SETTING_COUNT
                 if cluster_index < 0:
                     config_message = "Global settings cannot be deleted"
                 elif len(editable_config.clusters) == 1:
@@ -1535,7 +1817,7 @@ def dashboard(
                             editable_config = candidate
                             config_selection = min(
                                 config_selection,
-                                len(SETTING_FIELDS) + len(editable_config.clusters) - 1,
+                                SETTING_COUNT + len(editable_config.clusters) - 1,
                             )
                             config_dirty = True
                             config_message = f"Deleted {cluster_name}; press s to apply"
@@ -1545,6 +1827,9 @@ def dashboard(
                 try:
                     save_config(editable_config, config_path)
                     runtime_config = copy.deepcopy(editable_config)
+                    control_targets.update(
+                        configured_control_targets(runtime_config, user_override)
+                    )
                     config_dirty = False
                     config_message = "Saved and applied"
                     config_generation += 1
@@ -1597,6 +1882,11 @@ def dashboard(
                     loaded_config = load_config(config_path, create=False)
                     editable_config = copy.deepcopy(loaded_config)
                     runtime_config = copy.deepcopy(loaded_config)
+                    control_targets.update(
+                        configured_control_targets(runtime_config, user_override)
+                    )
+                    config_editing_cluster = None
+                    config_field_selection = 0
                     config_dirty = False
                     config_message = "Reloaded and applied from disk"
                     config_generation += 1
@@ -1688,4 +1978,10 @@ def dashboard(
                 )
                 refresh_generation = config_generation
     finally:
-        executor.shutdown(wait=False, cancel_futures=True)
+        for future in refresh_futures:
+            future.cancel()
+        for future in estimate_futures:
+            future.cancel()
+        cancel_active_commands()
+        executor.shutdown(wait=True, cancel_futures=True)
+        close_control_sessions(control_targets)

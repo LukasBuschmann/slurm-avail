@@ -69,8 +69,8 @@ does not speculate about when pending jobs will start.
 Clusters can use local or SSH collection, multiple login endpoints, CPU or GPU
 focused layouts, custom Slurm locations, and selected filesystem paths. They
 can also be hidden or reordered, while refresh and retry intervals are shared
-dashboard settings. SSH clusters can use non-interactive keys or a temporary
-interactive OpenSSH session. Everything is persisted in a readable TOML file.
+dashboard settings. SSH clusters can use an SSH key or ask OpenSSH to prompt
+for a password. Everything is persisted in a readable TOML file.
 
 ## Installation
 
@@ -129,6 +129,8 @@ TU Dresden/ZIH username.
 version = 1
 
 [settings]
+authenticate_on_startup = true
+control_persist_seconds = 3600
 node_refresh_seconds = 10
 filesystem_refresh_seconds = 60
 login_refresh_seconds = 60
@@ -150,8 +152,7 @@ name = "CAPELLA"
 mode = "ssh"
 addresses = ["login1.capella.hpc.tu-dresden.de", "login2.capella.hpc.tu-dresden.de"]
 user = "USERNAME"
-authentication = "batch"
-control_persist_seconds = 3600
+authentication = "batch" # SSH key
 focus = "gpu"
 hidden = false
 filesystems = ["/home", "/software", "/data/horse", "/data/walrus", "/data/narwhal", "/data/quokka", "/data/cat"]
@@ -163,8 +164,7 @@ name = "ALPHA"
 mode = "ssh"
 addresses = ["login1.alpha.hpc.tu-dresden.de", "login2.alpha.hpc.tu-dresden.de"]
 user = "USERNAME"
-authentication = "batch"
-control_persist_seconds = 3600
+authentication = "batch" # SSH key
 focus = "gpu"
 hidden = false
 filesystems = ["/home", "/software", "/data/horse", "/data/walrus", "/data/narwhal", "/data/quokka", "/data/cat"]
@@ -176,8 +176,7 @@ name = "BARNARD"
 mode = "ssh"
 addresses = ["login1.barnard.hpc.tu-dresden.de", "login2.barnard.hpc.tu-dresden.de"]
 user = "USERNAME"
-authentication = "batch"
-control_persist_seconds = 3600
+authentication = "batch" # SSH key
 focus = "cpu"
 hidden = false
 filesystems = ["/home", "/software", "/data/horse", "/data/walrus", "/data/narwhal", "/data/quokka", "/data/cat"]
@@ -189,8 +188,7 @@ name = "ROMEO"
 mode = "ssh"
 addresses = ["login1.romeo.hpc.tu-dresden.de", "login2.romeo.hpc.tu-dresden.de"]
 user = "USERNAME"
-authentication = "batch"
-control_persist_seconds = 3600
+authentication = "batch" # SSH key
 focus = "cpu"
 hidden = false
 filesystems = ["/home", "/software", "/data/horse", "/data/walrus", "/data/narwhal", "/data/quokka", "/data/cat"]
@@ -205,27 +203,38 @@ The `user` field is optional; when omitted, OpenSSH configuration determines
 the user. The Slurm path is also optional when `scontrol` and `squeue` are
 already available on the endpoint's `PATH`.
 
-### Interactive SSH authentication
+### SSH login methods
 
-SSH keys and agents use the default `batch` authentication mode. To use a
-password, keyboard-interactive login, or MFA without storing a credential in
-`slurm-avail`, configure the cluster with:
+The Config view names the two choices **SSH key** and **Password**. Choose SSH
+key when OpenSSH can connect without a prompt. Choose Password to let OpenSSH
+ask for a password, keyboard-interactive login, or MFA. In TOML, Password is
+written as:
 
 ```toml
 authentication = "interactive"
-control_persist_seconds = 3600
 ```
 
-Save the configuration, select the cluster card in Config, and press `c`.
+With `authenticate_on_startup = true`, the default, the dashboard opens these
+connections before its first refresh. Set it to `false` in `[settings]` to
+disable startup prompts. You can still select the cluster card in Config and
+press `c` to connect manually.
+
+`control_persist_seconds` in `[settings]` sets the connection lifetime for
+clusters using Password. Local clusters and clusters using an SSH key ignore
+it.
+
 `slurm-avail` temporarily returns control of the terminal to OpenSSH. OpenSSH
 handles the password, MFA, and host-key prompts directly, then keeps an
-authenticated connection open for the configured number of seconds. Each
-login endpoint has its own connection, so a two-endpoint cluster may prompt
-twice. Dashboard refreshes reuse those connections.
+authenticated connection open for the configured number of seconds. For a
+cluster with several login endpoints, the dashboard tries them in order and
+skips endpoints it cannot reach. It asks for credentials only on the first
+usable endpoint and stops after that authentication attempt. Dashboard
+refreshes reuse a successful connection. Quitting closes the OpenSSH control
+connection instead of leaving it alive until its timeout.
 
 The password never enters the TOML file, Python process, command arguments, or
-application output. Control sockets live in a private per-user directory. The
-dashboard leaves normal OpenSSH host-key verification enabled.
+application output. Each dashboard process uses its own private control-socket
+directory. The dashboard leaves normal OpenSSH host-key verification enabled.
 
 A different configuration file can be selected with:
 
@@ -253,7 +262,10 @@ slurm-avail --config /path/to/config.toml
 
 The Config view shows its editing controls in the legend. In particular, use
 `a` to add, `Enter` to edit, `h` to hide or show, `Shift+Up/Down` to reorder,
-`c` to authenticate an interactive SSH cluster, and `s` to save clusters.
+`c` to connect a cluster using Password, and `s` to save clusters. In
+the cluster editor, use `Up/Down` to select a field and `Left/Right`, `Space`,
+or `Enter` to choose from fixed options. Press `Enter` or `e` on text fields.
+You can press `s` from any field without stepping through the rest of the form.
 
 ## Requirements
 
@@ -277,11 +289,6 @@ On each configured cluster endpoint:
 - `/bin/sh` and standard POSIX utilities including `id`, `date`, `awk`,
   `sort`, `sed`, and `grep`
 - `df` and `tail` for filesystem monitoring (`timeout` is used when present)
-
-The default `batch` authentication mode must work non-interactively, normally
-through an SSH agent, keys, and `~/.ssh/config`. The optional `interactive`
-mode lets OpenSSH ask for a password or MFA and cache an authenticated
-connection. `slurm-avail` does not read or store passwords or private keys.
 
 ## Command-line usage
 

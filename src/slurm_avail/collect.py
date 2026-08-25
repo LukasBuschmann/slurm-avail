@@ -34,6 +34,7 @@ from .models import (
     SchedulerData,
     UserJob,
 )
+from .processes import run_captured, wait_or_cancel
 from .ssh_auth import multiplex_options
 
 UNAVAILABLE_RE = re.compile(
@@ -951,11 +952,9 @@ def ssh_error_message(error: BaseException) -> str:
 
 def ssh_config_user(hostname: str) -> str:
     try:
-        result = subprocess.run(
+        result = run_captured(
             ["ssh", "-G", hostname],
             check=True,
-            capture_output=True,
-            text=True,
             timeout=5,
         )
         for raw_line in result.stdout.splitlines():
@@ -985,7 +984,7 @@ def run_ssh(
     timeout: int,
     connect_timeout: int,
 ) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(
+    return run_captured(
         [
             "ssh",
             "-l",
@@ -1005,8 +1004,6 @@ def run_ssh(
             remote_command,
         ],
         check=True,
-        capture_output=True,
-        text=True,
         timeout=timeout,
     )
 
@@ -1015,11 +1012,9 @@ def run_local(
     command: str,
     timeout: int,
 ) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(
+    return run_captured(
         ["/bin/sh", "-lc", command],
         check=True,
-        capture_output=True,
-        text=True,
         timeout=timeout,
     )
 
@@ -1161,8 +1156,10 @@ def fetch_cluster_estimate(
                 )
             except (OSError, RuntimeError, subprocess.SubprocessError) as error:
                 last_error = ssh_error_message(error)
-                if attempt < settings.retries_per_address:
-                    time.sleep(settings.retry_delay_seconds)
+                if attempt < settings.retries_per_address and wait_or_cancel(
+                    settings.retry_delay_seconds
+                ):
+                    break
     return EstimateResult(
         cluster_name=cluster_config.name,
         status="error",
@@ -1352,8 +1349,10 @@ def fetch_cluster(
                     auth_required=endpoint_auth_required,
                     error=last_error,
                 )
-                if attempt < settings.retries_per_address:
-                    time.sleep(settings.retry_delay_seconds)
+                if attempt < settings.retries_per_address and wait_or_cancel(
+                    settings.retry_delay_seconds
+                ):
+                    break
         if cluster is not None:
             break
 

@@ -11,6 +11,8 @@ from pathlib import Path
 
 @dataclass
 class DashboardSettings:
+    authenticate_on_startup: bool = True
+    control_persist_seconds: int = 3600
     node_refresh_seconds: int = 10
     filesystem_refresh_seconds: int = 60
     login_refresh_seconds: int = 60
@@ -35,7 +37,6 @@ class ClusterConfig:
     addresses: list[str] = field(default_factory=list)
     user: str | None = None
     authentication: str = "batch"
-    control_persist_seconds: int = 3600
     focus: str = "auto"
     hidden: bool = False
     filesystems: list[str] = field(default_factory=list)
@@ -51,6 +52,7 @@ class AppConfig:
 
 
 SETTING_FIELDS = (
+    ("control_persist_seconds", "SSH session lifetime", 1, 86400),
     ("node_refresh_seconds", "Node refresh", 1, 3600),
     ("filesystem_refresh_seconds", "Filesystem refresh", 1, 86400),
     ("login_refresh_seconds", "Endpoint refresh", 1, 86400),
@@ -67,6 +69,8 @@ SETTING_FIELDS = (
     ("retry_delay_seconds", "Delay between retries", 0, 60),
     ("forecast_horizon_days", "Forecast horizon days", 1, 3650),
 )
+BOOLEAN_SETTING_FIELDS = (("authenticate_on_startup", "Startup authentication"),)
+SETTING_COUNT = len(SETTING_FIELDS) + len(BOOLEAN_SETTING_FIELDS)
 SETTING_LIMITS = {
     key: (minimum, maximum) for key, _label, minimum, maximum in SETTING_FIELDS
 }
@@ -89,8 +93,14 @@ def config_to_dict(config: AppConfig) -> dict[str, object]:
     return {
         "version": config.version,
         "settings": {
-            key: getattr(config.settings, key)
-            for key, _label, _minimum, _maximum in SETTING_FIELDS
+            **{
+                key: getattr(config.settings, key)
+                for key, _label, _minimum, _maximum in SETTING_FIELDS
+            },
+            **{
+                key: getattr(config.settings, key)
+                for key, _label in BOOLEAN_SETTING_FIELDS
+            },
         },
         "clusters": [
             {
@@ -99,7 +109,6 @@ def config_to_dict(config: AppConfig) -> dict[str, object]:
                 "addresses": cluster.addresses,
                 "user": cluster.user,
                 "authentication": cluster.authentication,
-                "control_persist_seconds": cluster.control_persist_seconds,
                 "focus": cluster.focus,
                 "hidden": cluster.hidden,
                 "filesystems": cluster.filesystems,
@@ -162,14 +171,6 @@ def validate_config(config: AppConfig) -> None:
             raise ValueError(
                 f"{cluster.name}: authentication must be batch or interactive"
             )
-        if (
-            not isinstance(cluster.control_persist_seconds, int)
-            or isinstance(cluster.control_persist_seconds, bool)
-            or not 1 <= cluster.control_persist_seconds <= 86400
-        ):
-            raise ValueError(
-                f"{cluster.name}: control_persist_seconds must be between 1 and 86400"
-            )
         if cluster.focus not in ("auto", "cpu", "gpu"):
             raise ValueError(f"{cluster.name}: focus must be auto, cpu, or gpu")
         if not isinstance(cluster.hidden, bool):
@@ -184,6 +185,9 @@ def validate_config(config: AppConfig) -> None:
             raise ValueError(f"settings.{key} must be an integer")
         if not minimum <= value <= maximum:
             raise ValueError(f"settings.{key} must be between {minimum} and {maximum}")
+    for key, _label in BOOLEAN_SETTING_FIELDS:
+        if not isinstance(getattr(config.settings, key), bool):
+            raise ValueError(f"settings.{key} must be true or false")
 
 
 def app_config_from_dict(data: object) -> AppConfig:
@@ -200,10 +204,21 @@ def app_config_from_dict(data: object) -> AppConfig:
     for key, _label, _minimum, _maximum in SETTING_FIELDS:
         if key in settings_data:
             setattr(settings, key, settings_data[key])
+    for key, _label in BOOLEAN_SETTING_FIELDS:
+        if key in settings_data:
+            setattr(settings, key, settings_data[key])
 
     clusters_data = data.get("clusters", [])
     if not isinstance(clusters_data, list):
         raise ValueError("clusters must be an array of tables")
+    if "control_persist_seconds" not in settings_data:
+        for raw_cluster in clusters_data:
+            if not isinstance(raw_cluster, dict):
+                continue
+            legacy_value = raw_cluster.get("control_persist_seconds")
+            if isinstance(legacy_value, int) and not isinstance(legacy_value, bool):
+                settings.control_persist_seconds = legacy_value
+                break
     clusters: list[ClusterConfig] = []
     for index, raw_cluster in enumerate(clusters_data):
         if not isinstance(raw_cluster, dict):
@@ -226,7 +241,6 @@ def app_config_from_dict(data: object) -> AppConfig:
             raise ValueError(f"clusters[{index}].user must be a string or null")
         mode = raw_cluster.get("mode", "ssh")
         authentication = raw_cluster.get("authentication", "batch")
-        control_persist_seconds = raw_cluster.get("control_persist_seconds", 3600)
         focus = raw_cluster.get("focus", "auto")
         hidden = raw_cluster.get("hidden", False)
         slurm_bin_path = raw_cluster.get("slurm_bin_path", "")
@@ -237,12 +251,6 @@ def app_config_from_dict(data: object) -> AppConfig:
             raise ValueError(
                 f"clusters[{index}] mode, authentication, focus, and "
                 "slurm_bin_path must be strings"
-            )
-        if not isinstance(control_persist_seconds, int) or isinstance(
-            control_persist_seconds, bool
-        ):
-            raise ValueError(
-                f"clusters[{index}].control_persist_seconds must be an integer"
             )
         if not isinstance(hidden, bool):
             raise ValueError(f"clusters[{index}].hidden must be true or false")
@@ -256,7 +264,6 @@ def app_config_from_dict(data: object) -> AppConfig:
                 ),
                 user=user,
                 authentication=authentication,
-                control_persist_seconds=control_persist_seconds,
                 focus=focus,
                 hidden=hidden,
                 filesystems=string_list(
@@ -284,6 +291,9 @@ def save_config(config: AppConfig, path: Path) -> None:
         lines = [f"version = {config.version}", "", "[settings]"]
         for key, _label, _minimum, _maximum in SETTING_FIELDS:
             lines.append(f"{key} = {getattr(config.settings, key)}")
+        for key, _label in BOOLEAN_SETTING_FIELDS:
+            value = str(getattr(config.settings, key)).lower()
+            lines.append(f"{key} = {value}")
         for cluster in config.clusters:
             lines.extend(
                 [
@@ -304,7 +314,6 @@ def save_config(config: AppConfig, path: Path) -> None:
             lines.extend(
                 [
                     f"authentication = {json.dumps(cluster.authentication)}",
-                    f"control_persist_seconds = {cluster.control_persist_seconds}",
                     f"focus = {json.dumps(cluster.focus)}",
                     f"hidden = {str(cluster.hidden).lower()}",
                     "filesystems = ["

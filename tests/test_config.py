@@ -17,14 +17,17 @@ from slurm_avail.config import (
 def test_config_round_trip_and_private_permissions(tmp_path: Path) -> None:
     path = tmp_path / "nested" / "config.toml"
     expected = AppConfig(
-        settings=DashboardSettings(node_refresh_seconds=12),
+        settings=DashboardSettings(
+            authenticate_on_startup=False,
+            control_persist_seconds=900,
+            node_refresh_seconds=12,
+        ),
         clusters=[
             ClusterConfig(
                 name="REMOTE",
                 addresses=["login1.example.org", "login2.example.org"],
                 user="researcher",
                 authentication="interactive",
-                control_persist_seconds=900,
                 focus="gpu",
                 filesystems=["/home", "/scratch"],
                 slurm_bin_path="/opt/slurm/bin",
@@ -39,7 +42,11 @@ def test_config_round_trip_and_private_permissions(tmp_path: Path) -> None:
     assert stat.S_IMODE(path.stat().st_mode) == 0o600
     config_text = path.read_text(encoding="utf-8")
     assert 'authentication = "interactive"' in config_text
-    assert "control_persist_seconds = 900" in config_text
+    assert "authenticate_on_startup = false" in config_text
+    settings_section = config_text.split("[[clusters]]", 1)[0]
+    cluster_section = config_text.split("[[clusters]]", 1)[1]
+    assert "control_persist_seconds = 900" in settings_section
+    assert "control_persist_seconds" not in cluster_section
     assert "password" not in config_text.casefold()
 
 
@@ -106,4 +113,64 @@ addresses = ["login.example.org"]
     cluster = load_config(path, create=False).clusters[0]
 
     assert cluster.authentication == "batch"
-    assert cluster.control_persist_seconds == 3600
+
+
+def test_legacy_cluster_session_lifetime_moves_to_global_settings(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "config.toml"
+    path.write_text(
+        """
+version = 1
+
+[[clusters]]
+name = "REMOTE"
+mode = "ssh"
+addresses = ["login.example.org"]
+authentication = "interactive"
+control_persist_seconds = 900
+""",
+        encoding="utf-8",
+    )
+
+    config = load_config(path, create=False)
+
+    assert config.settings.control_persist_seconds == 900
+
+
+def test_existing_config_defaults_to_startup_authentication(tmp_path: Path) -> None:
+    path = tmp_path / "config.toml"
+    path.write_text(
+        """
+version = 1
+
+[[clusters]]
+name = "LOCAL"
+mode = "local"
+""",
+        encoding="utf-8",
+    )
+
+    config = load_config(path, create=False)
+
+    assert config.settings.authenticate_on_startup is True
+
+
+def test_startup_authentication_setting_must_be_boolean(tmp_path: Path) -> None:
+    path = tmp_path / "config.toml"
+    path.write_text(
+        """
+version = 1
+
+[settings]
+authenticate_on_startup = "yes"
+
+[[clusters]]
+name = "LOCAL"
+mode = "local"
+""",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="must be true or false"):
+        load_config(path, create=False)

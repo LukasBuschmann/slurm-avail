@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import contextlib
 import curses
+import signal
 import sys
 from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
@@ -172,16 +173,30 @@ def main() -> int:
             render_once(clusters, context, config.settings)
         return 0
 
-    with contextlib.suppress(KeyboardInterrupt):
-        curses.wrapper(
-            dashboard,
-            initial_view,
-            config,
-            config_path,
-            arguments.user,
-            selected_cluster_index,
-            jobs_scope_index,
-        )
+    def request_shutdown(_signal_number: int, _frame: object) -> None:
+        raise KeyboardInterrupt
+
+    handled_signals = (signal.SIGHUP, signal.SIGTERM)
+    previous_handlers = {
+        signal_number: signal.getsignal(signal_number)
+        for signal_number in handled_signals
+    }
+    for signal_number in handled_signals:
+        signal.signal(signal_number, request_shutdown)
+    try:
+        with contextlib.suppress(KeyboardInterrupt):
+            curses.wrapper(
+                dashboard,
+                initial_view,
+                config,
+                config_path,
+                arguments.user,
+                selected_cluster_index,
+                jobs_scope_index,
+            )
+    finally:
+        for signal_number, handler in previous_handlers.items():
+            signal.signal(signal_number, handler)
     return 0
 
 
