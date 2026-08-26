@@ -7,12 +7,14 @@ import contextlib
 import curses
 import signal
 import sys
+from collections.abc import Iterator
 from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
+from typing import TextIO
 
 from .collect import fetch_all_clusters
 from .config import AppConfig, active_cluster_configs, load_config
-from .constants import DEFAULT_CONFIG_PATH, VIEWS
+from .constants import APP_NAME, DEFAULT_CONFIG_PATH, VIEWS
 from .output import (
     placeholder_clusters,
     render_config_once,
@@ -32,6 +34,26 @@ def package_version() -> str:
         return version("slurm-avail")
     except PackageNotFoundError:
         return "0.2.0.dev0"
+
+
+@contextlib.contextmanager
+def terminal_window_title(
+    title: str,
+    stream: TextIO | None = None,
+) -> Iterator[None]:
+    """Set a terminal window title for the duration of the live dashboard."""
+    output = stream or sys.stdout
+    if not output.isatty():
+        yield
+        return
+    safe_title = title.replace("\x1b", "").replace("\x07", "")
+    output.write(f"\x1b[22;2t\x1b]2;{safe_title}\x07")
+    output.flush()
+    try:
+        yield
+    finally:
+        output.write("\x1b[23;2t")
+        output.flush()
 
 
 def initial_cluster_index(config: AppConfig, requested: str | None) -> int:
@@ -184,7 +206,7 @@ def main() -> int:
     for signal_number in handled_signals:
         signal.signal(signal_number, request_shutdown)
     try:
-        with contextlib.suppress(KeyboardInterrupt):
+        with terminal_window_title(APP_NAME), contextlib.suppress(KeyboardInterrupt):
             curses.wrapper(
                 dashboard,
                 initial_view,
