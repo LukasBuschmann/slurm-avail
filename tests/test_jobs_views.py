@@ -1,10 +1,16 @@
 from __future__ import annotations
 
-from slurm_avail.jobs_views import job_row, jobs_table, sticky_jobs_headers
+from slurm_avail.jobs_views import (
+    job_row,
+    jobs_table,
+    priority_distribution_rows,
+    sticky_jobs_headers,
+)
 from slurm_avail.models import (
     Cluster,
     FairshareAssociation,
     Node,
+    PendingJobPriority,
     PriorityFactors,
     UserJob,
 )
@@ -40,6 +46,17 @@ def test_jobs_table_shows_scheduler_placement_and_priority_details() -> None:
         host="login",
         user="researcher",
         jobs=[job],
+        pending_priorities=[
+            PendingJobPriority(job_id="100", priority=2_000, partition="capella"),
+            PendingJobPriority(
+                job_id="3931173",
+                priority=12_910,
+                partition="capella",
+            ),
+            PendingJobPriority(job_id="101", priority=20_000, partition="capella"),
+            PendingJobPriority(job_id="102", priority=20_000, partition="other"),
+            PendingJobPriority(job_id="103", priority=50_000, partition="capella"),
+        ],
         fairshare=[
             FairshareAssociation(
                 account="project_a",
@@ -79,9 +96,60 @@ def test_jobs_table_shows_scheduler_placement_and_priority_details() -> None:
     assert "time limit 08:00:00  nodes 1  CPUs 32" in text
     assert "4×h100" in text
     assert "fair-share" in text
+    assert "VISIBLE PENDING PRIORITIES" not in text
+    assert "selected 12,910" not in text
+    assert "higher 3 · equal 1 · lower 1" in text
     assert "priority/multifactor" in text
     assert "selected" in styles
     assert "[0 ALL]" in text
+
+
+def test_priority_distribution_gives_zero_its_own_log_bucket() -> None:
+    job = UserJob(
+        job_id="selected",
+        partition="gpu",
+        name="queued",
+        state="PENDING",
+        reason="Priority",
+        priority="",
+        start=None,
+        end=None,
+        scheduled_nodes=(),
+        time_limit="01:00:00",
+        node_count=1,
+        cpu_count=1,
+        memory="1G",
+        tres_per_node="",
+        allocated_tres="",
+        account="project",
+        qos="normal",
+    )
+    cluster = Cluster(
+        name="GPU",
+        host="login",
+        pending_priorities=[
+            PendingJobPriority(job_id="held", priority=0, partition="gpu"),
+            PendingJobPriority(job_id="spike", priority=11_113, partition="gpu"),
+            PendingJobPriority(
+                job_id="selected",
+                priority=11_678,
+                partition="gpu",
+            ),
+            PendingJobPriority(job_id="high", priority=118_239, partition="gpu"),
+        ],
+    )
+
+    rows = priority_distribution_rows(cluster, job)
+    text = "\n".join("".join(value for value, _style in row) for row in rows)
+    chart = rows[0]
+    selected_bucket = next(
+        index for index, (_value, style) in enumerate(chart[1:]) if style == "mine"
+    )
+
+    assert "0" in text
+    assert "118k" in text
+    assert "higher 1 · equal 1 · lower 2" in text
+    assert selected_bucket == 2
 
 
 def test_jobs_table_distinguishes_start_estimate_without_nodes() -> None:

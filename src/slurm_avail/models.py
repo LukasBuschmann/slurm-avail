@@ -84,6 +84,15 @@ class PriorityFactors:
     tres: str = ""
 
 
+@dataclass(frozen=True)
+class PendingJobPriority:
+    """Raw scheduler priority for a pending job visible to ``squeue``."""
+
+    job_id: str
+    priority: int
+    partition: str
+
+
 @dataclass
 class UserJob:
     job_id: str
@@ -145,11 +154,13 @@ class SchedulerData:
     running_jobs: list[RunningInterval] = field(default_factory=list)
     jobs: list[UserJob] = field(default_factory=list)
     past_jobs: list[UserJob] = field(default_factory=list)
+    pending_priorities: list[PendingJobPriority] = field(default_factory=list)
     fairshare: list[FairshareAssociation] = field(default_factory=list)
     priority_config: dict[str, str] = field(default_factory=dict)
     jobs_error: str | None = None
     history_error: str | None = None
     priority_error: str | None = None
+    pending_priorities_error: str | None = None
     fairshare_error: str | None = None
 
 
@@ -208,11 +219,13 @@ class Cluster:
     running_jobs: list[RunningInterval] = field(default_factory=list)
     jobs: list[UserJob] = field(default_factory=list)
     past_jobs: list[UserJob] = field(default_factory=list)
+    pending_priorities: list[PendingJobPriority] = field(default_factory=list)
     fairshare: list[FairshareAssociation] = field(default_factory=list)
     priority_config: dict[str, str] = field(default_factory=dict)
     jobs_error: str | None = None
     history_error: str | None = None
     priority_error: str | None = None
+    pending_priorities_error: str | None = None
     fairshare_error: str | None = None
     loading: bool = False
     auth_required: bool = False

@@ -28,6 +28,7 @@ from .models import (
     Filesystem,
     LoginNode,
     Node,
+    PendingJobPriority,
     PriorityFactors,
     ReservationInterval,
     RunningInterval,
@@ -80,6 +81,12 @@ if [ -z "$dashboard_jobs_error" ]; then
     printf '%s\n' "$dashboard_jobs"
 else
     printf '__ERROR__|%s\n' "$dashboard_jobs_error"
+fi
+printf '__PENDING_PRIORITIES__\n'
+if pending_priority_rows=$(squeue -a -t PD -h -o '%i|%Q|%P' 2>&1); then
+    printf '%s\n' "$pending_priority_rows"
+else
+    printf '__ERROR__|%s\n' "$(printf '%s\n' "$pending_priority_rows" | sed -n '1p')"
 fi
 printf '__PRIORITIES__\n'
 if [ -n "$dashboard_jobs" ]; then
@@ -615,7 +622,10 @@ def parse_schedule(
     running_output, jobs_marker, rest = rest.partition("__USER_JOBS__\n")
     if not jobs_marker:
         raise RuntimeError("remote user-job marker missing")
-    user_jobs_output, priority_marker, rest = rest.partition("__PRIORITIES__\n")
+    user_jobs_output, pending_marker, rest = rest.partition("__PENDING_PRIORITIES__\n")
+    if not pending_marker:
+        raise RuntimeError("remote pending-priority marker missing")
+    pending_priority_output, priority_marker, rest = rest.partition("__PRIORITIES__\n")
     if not priority_marker:
         raise RuntimeError("remote priority marker missing")
     priority_output, fairshare_marker, rest = rest.partition("__FAIRSHARE__\n")
@@ -780,6 +790,28 @@ def parse_schedule(
     for job in jobs:
         job.priority_factors = priority_by_job.get(job.job_id)
 
+    pending_priorities: list[PendingJobPriority] = []
+    pending_priorities_error: str | None = None
+    for raw_line in pending_priority_output.splitlines():
+        if raw_line.startswith("__ERROR__|"):
+            pending_priorities_error = (
+                raw_line.partition("|")[2] or "pending priorities unavailable"
+            )
+            continue
+        fields = raw_line.split("|", 2)
+        if len(fields) != 3:
+            continue
+        job_id, priority_text, partition = (field.strip() for field in fields)
+        if not job_id or not re.fullmatch(r"-?\d+", priority_text):
+            continue
+        pending_priorities.append(
+            PendingJobPriority(
+                job_id=job_id,
+                priority=int(priority_text),
+                partition=partition.rstrip("*"),
+            )
+        )
+
     job_accounts = {job.account for job in jobs if job.account}
     fairshare: list[FairshareAssociation] = []
     fairshare_error: str | None = None
@@ -827,10 +859,12 @@ def parse_schedule(
         reservations=reservations,
         running_jobs=running_jobs,
         jobs=jobs,
+        pending_priorities=pending_priorities,
         fairshare=fairshare,
         priority_config=priority_config,
         jobs_error=jobs_error,
         priority_error=priority_error,
+        pending_priorities_error=pending_priorities_error,
         fairshare_error=fairshare_error,
     )
 
@@ -1260,11 +1294,13 @@ def fetch_from_endpoint(
         running_jobs=scheduler_data.running_jobs,
         jobs=scheduler_data.jobs,
         past_jobs=scheduler_data.past_jobs,
+        pending_priorities=scheduler_data.pending_priorities,
         fairshare=scheduler_data.fairshare,
         priority_config=scheduler_data.priority_config,
         jobs_error=scheduler_data.jobs_error,
         history_error=scheduler_data.history_error,
         priority_error=scheduler_data.priority_error,
+        pending_priorities_error=scheduler_data.pending_priorities_error,
         fairshare_error=scheduler_data.fairshare_error,
     )
 
@@ -1493,10 +1529,12 @@ def merge_cluster_refresh(
         refreshed.running_jobs = previous.running_jobs
     if not include_schedule and not include_jobs:
         refreshed.jobs = previous.jobs
+        refreshed.pending_priorities = previous.pending_priorities
         refreshed.fairshare = previous.fairshare
         refreshed.priority_config = previous.priority_config
         refreshed.jobs_error = previous.jobs_error
         refreshed.priority_error = previous.priority_error
+        refreshed.pending_priorities_error = previous.pending_priorities_error
         refreshed.fairshare_error = previous.fairshare_error
     if not include_history:
         refreshed.past_jobs = previous.past_jobs

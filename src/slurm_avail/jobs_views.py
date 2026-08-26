@@ -25,6 +25,8 @@ START_WIDTH = 15
 PLACEMENT_WIDTH = 11
 ELAPSED_WIDTH = 11
 FACTOR_BAR_WIDTH = 20
+PRIORITY_HISTOGRAM_WIDTH = 64
+PRIORITY_LEVELS = "▁▂▃▄▅▆▇█"
 
 
 def clipped_cell(value: str, width: int) -> str:
@@ -320,6 +322,140 @@ def factor_rows(factors: PriorityFactors) -> list[Line]:
     return rows
 
 
+def priority_distribution_rows(cluster: Cluster, job: UserJob) -> list[Line]:
+    """Draw the selected pending job within visible cluster priorities."""
+    if job.is_running or job.historical:
+        return []
+
+    rows: list[Line] = []
+    if cluster.pending_priorities_error:
+        rows.append(line(("  Priority distribution unavailable.", "offline")))
+        return rows
+
+    selected = next(
+        (item for item in cluster.pending_priorities if item.job_id == job.job_id),
+        None,
+    )
+    if selected is None:
+        rows.append(
+            line(("  Selected job is not in the current queue snapshot.", "offline"))
+        )
+        return rows
+
+    priorities = [item.priority for item in cluster.pending_priorities]
+    positive_priorities = [priority for priority in priorities if priority > 0]
+    has_zero_bucket = len(positive_priorities) != len(priorities)
+    zero_offset = int(has_zero_bucket)
+    if positive_priorities:
+        positive_minimum = min(positive_priorities)
+        positive_maximum = max(positive_priorities)
+        positive_span = positive_maximum - positive_minimum + 1
+        positive_bin_count = min(
+            PRIORITY_HISTOGRAM_WIDTH - zero_offset,
+            positive_span,
+        )
+        log_minimum = math.log(positive_minimum)
+        log_maximum = math.log(positive_maximum)
+        log_width = (
+            (log_maximum - log_minimum) / positive_bin_count
+            if log_maximum > log_minimum
+            else 1.0
+        )
+    else:
+        positive_bin_count = 0
+        log_minimum = 0.0
+        log_maximum = 0.0
+        log_width = 1.0
+    bin_count = zero_offset + positive_bin_count
+
+    def bucket_index(priority: int) -> int:
+        if priority <= 0:
+            return 0
+        if log_maximum == log_minimum:
+            return zero_offset
+        return zero_offset + min(
+            positive_bin_count - 1,
+            int((math.log(priority) - log_minimum) / log_width),
+        )
+
+    counts = [0] * bin_count
+    for priority in priorities:
+        index = bucket_index(priority)
+        counts[index] += 1
+    selected_bin = bucket_index(selected.priority)
+    peak = max(counts)
+    glyphs = [
+        " "
+        if count == 0
+        else PRIORITY_LEVELS[
+            min(
+                len(PRIORITY_LEVELS) - 1,
+                math.ceil(len(PRIORITY_LEVELS) * count / peak) - 1,
+            )
+        ]
+        for count in counts
+    ]
+    chart = line(("  ", "normal"))
+    for index, glyph in enumerate(glyphs):
+        chart.append((glyph, "mine" if index == selected_bin else "cpu"))
+    rows.append(chart)
+
+    tick_count = min(5, bin_count)
+    tick_positions = (
+        [0]
+        if tick_count == 1
+        else sorted(
+            {
+                round(index * (bin_count - 1) / (tick_count - 1))
+                for index in range(tick_count)
+            }
+        )
+    )
+    axis = ["─"] * bin_count
+    for position in tick_positions:
+        axis[position] = "┼"
+    axis[0] = "├"
+    if bin_count > 1:
+        axis[-1] = "┤"
+    rows.append(plain("  " + "".join(axis)))
+
+    def tick_value(position: int) -> int:
+        if position == 0 and has_zero_bucket:
+            return 0
+        if positive_bin_count <= 1:
+            return positive_priorities[0] if positive_priorities else 0
+        positive_position = position - zero_offset
+        ratio = positive_position / (positive_bin_count - 1)
+        return round(math.exp(log_minimum + ratio * (log_maximum - log_minimum)))
+
+    def compact_tick(value: int) -> str:
+        if value >= 1_000_000_000:
+            return f"{value / 1_000_000_000:.3g}G"
+        if value >= 1_000_000:
+            return f"{value / 1_000_000:.3g}M"
+        if value >= 1_000:
+            return f"{value / 1_000:.3g}k"
+        return str(value)
+
+    labels = [" "] * bin_count
+    occupied = [False] * bin_count
+    for position in tick_positions:
+        label = compact_tick(tick_value(position))
+        start = min(max(0, position - len(label) // 2), bin_count - len(label))
+        end = start + len(label)
+        if start < 0 or end > bin_count or any(occupied[start:end]):
+            continue
+        labels[start:end] = label
+        occupied[start:end] = [True] * len(label)
+    rows.append(plain("  " + "".join(labels).rstrip()))
+
+    higher = sum(priority > selected.priority for priority in priorities)
+    equal = sum(priority == selected.priority for priority in priorities)
+    lower = len(priorities) - higher - equal
+    rows.append(plain(f"  higher {higher:,} · equal {equal:,} · lower {lower:,}"))
+    return rows
+
+
 def optional_number(value: float | None, *, percent: bool = False) -> str:
     if value is None:
         return "—"
@@ -404,6 +540,8 @@ def selected_job_details(cluster: Cluster, job: UserJob) -> list[Line]:
     else:
         rows.append(plain(f"  total        {job.priority_factors.total}"))
         rows.extend(factor_rows(job.priority_factors))
+
+    rows.extend(priority_distribution_rows(cluster, job))
 
     rows.append(line(("FAIR-SHARE ASSOCIATION", "title")))
     associations = [

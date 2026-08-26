@@ -121,6 +121,10 @@ def test_schedule_marks_current_users_jobs_and_reservations() -> None:
                 "08:00:00|2|32|64G|gres/gpu:a100:2|cpu=32,gres/gpu=4|"
                 "project_a|normal"
             ),
+            "__PENDING_PRIORITIES__",
+            "125|12910|gpu",
+            "900|20000|gpu",
+            "901|5000|cpu*",
             "__PRIORITIES__",
             "125|12910|0|100|0|12000|810|0|0|0|",
             "__FAIRSHARE__",
@@ -145,6 +149,12 @@ def test_schedule_marks_current_users_jobs_and_reservations() -> None:
     assert schedule.jobs[0].scheduled_nodes == ("gpu03", "gpu04")
     assert schedule.jobs[0].priority_factors is not None
     assert schedule.jobs[0].priority_factors.fairshare == 12000
+    assert [item.priority for item in schedule.pending_priorities] == [
+        12910,
+        20000,
+        5000,
+    ]
+    assert schedule.pending_priorities[2].partition == "cpu"
     assert [(row.account, row.user) for row in schedule.fairshare] == [
         ("project_a", ""),
         ("project_a", "researcher"),
@@ -170,6 +180,8 @@ def test_jobs_only_response_and_command_do_not_require_forecast_data() -> None:
                 "01:00:00|1|8|16G|gres/gpu:1|cpu=8,gres/gpu=1|"
                 "project_a|normal"
             ),
+            "__PENDING_PRIORITIES__",
+            "125|10|gpu",
             "__PRIORITIES__",
             "125|10|0|1|0|8|1|0|0|0|",
             "__FAIRSHARE__",
@@ -193,9 +205,11 @@ def test_jobs_only_response_and_command_do_not_require_forecast_data() -> None:
     assert [job.job_id for job in jobs_data.jobs] == ["126", "125"]
     assert jobs_data.jobs[0].is_running
     assert jobs_data.jobs[0].scheduled_nodes == ("gpu05",)
+    assert jobs_data.pending_priorities[0].job_id == "125"
     assert "__JOBS__" in command
     assert "__RESERVATIONS__" not in command
     assert "-o '%i|%P|%j|%T|%r|%Q|%V|%S|%e|%N|%n|" in command
+    assert "squeue -a -t PD -h -o '%i|%Q|%P'" in command
 
 
 def test_jobs_parser_reports_an_unrecognized_old_squeue_layout() -> None:
@@ -204,6 +218,7 @@ def test_jobs_parser_reports_an_unrecognized_old_squeue_layout() -> None:
             "__TIMEZONE__|+0200",
             "__USER_JOBS__",
             "5208641all.qbashRUNNINGNone10003",
+            "__PENDING_PRIORITIES__",
             "__PRIORITIES__",
             "__FAIRSHARE__",
             "__PRIORITY_CONFIG__",
@@ -217,6 +232,26 @@ def test_jobs_parser_reports_an_unrecognized_old_squeue_layout() -> None:
     assert jobs_data.jobs_error == (
         "unrecognized squeue field layout (1 fields, expected 19)"
     )
+
+
+def test_pending_priority_collection_error_is_kept_separate() -> None:
+    output = "\n".join(
+        [
+            "__TIMEZONE__|+0200",
+            "__USER_JOBS__",
+            "__PENDING_PRIORITIES__",
+            "__ERROR__|Access denied",
+            "__PRIORITIES__",
+            "__FAIRSHARE__",
+            "__PRIORITY_CONFIG__",
+            "PriorityType = priority/basic",
+        ]
+    )
+
+    jobs_data = parse_jobs(output, "researcher")
+
+    assert jobs_data.pending_priorities == []
+    assert jobs_data.pending_priorities_error == "Access denied"
 
 
 def test_parse_history_returns_completed_jobs_and_skips_live_jobs() -> None:
