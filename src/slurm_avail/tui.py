@@ -18,11 +18,13 @@ from .collect import (
 )
 from .config import (
     BOOLEAN_SETTING_FIELDS,
+    CLUSTER_OFFSET,
     SETTING_COUNT,
     SETTING_FIELDS,
     AppConfig,
     ClusterConfig,
     DashboardSettings,
+    active_views,
     load_config,
     save_config,
     validate_config,
@@ -45,6 +47,7 @@ from .constants import (
     GAP,
     LEGEND_WIDTH,
     LOGIN_TABLE_WIDTH,
+    VIEW_LABELS,
     VIEWS,
     Line,
 )
@@ -364,7 +367,9 @@ def dashboard(
     next_jobs_refresh = 0.0
     next_history_refresh = 0.0
     next_forecast_refresh = 0.0
-    active_view = initial_view
+    visible_views = active_views(runtime_config.settings)
+    active_view = initial_view if initial_view in visible_views else visible_views[0]
+    live_views = set(visible_views) - {"config", "usage", "estimate"}
     forecast_cluster_index = initial_cluster_index
     jobs_cluster_index = initial_jobs_scope_index
     usage = UsageHistory()
@@ -421,21 +426,25 @@ def dashboard(
                 )
 
     executor = concurrent.futures.ThreadPoolExecutor(max_workers=32)
-    refresh_includes_filesystems = True
-    refresh_checks_login_nodes = True
-    refresh_includes_schedule = True
-    refresh_includes_jobs = True
-    refresh_includes_history = True
+    refresh_includes_filesystems = "filesystems" in visible_views
+    refresh_checks_login_nodes = "logins" in visible_views
+    refresh_includes_schedule = bool(live_views & {"nodes", "forecast"})
+    refresh_includes_jobs = "jobs" in visible_views
+    refresh_includes_history = "jobs" in visible_views
     refresh_generation = config_generation
-    refresh_futures = submit_cluster_refreshes(
-        executor,
-        runtime_config,
-        user_override,
-        refresh_includes_filesystems,
-        refresh_checks_login_nodes,
-        refresh_includes_schedule,
-        refresh_includes_jobs,
-        refresh_includes_history,
+    refresh_futures = (
+        submit_cluster_refreshes(
+            executor,
+            runtime_config,
+            user_override,
+            refresh_includes_filesystems,
+            refresh_checks_login_nodes,
+            refresh_includes_schedule,
+            refresh_includes_jobs,
+            refresh_includes_history,
+        )
+        if live_views
+        else {}
     )
 
     def run_estimate_test() -> None:
@@ -467,6 +476,8 @@ def dashboard(
 
     try:
         while True:
+            visible_views = active_views(runtime_config.settings)
+            live_views = set(visible_views) - {"config", "usage", "estimate"}
             now = time.monotonic()
             completed_futures = [future for future in refresh_futures if future.done()]
             for future in completed_futures:
@@ -559,13 +570,18 @@ def dashboard(
                 if refresh_includes_history:
                     next_history_refresh = now + settings.jobs_history_refresh_seconds
 
-            if not refresh_futures:
-                filesystem_due = now >= next_filesystem_refresh
-                login_due = now >= next_login_refresh
+            if not refresh_futures and live_views:
+                filesystem_due = (
+                    "filesystems" in visible_views and now >= next_filesystem_refresh
+                )
+                login_due = "logins" in visible_views and now >= next_login_refresh
                 node_due = now >= next_node_refresh
-                jobs_due = now >= next_jobs_refresh
-                history_due = now >= next_history_refresh
-                forecast_due = now >= next_forecast_refresh
+                jobs_due = "jobs" in visible_views and now >= next_jobs_refresh
+                history_due = "jobs" in visible_views and now >= next_history_refresh
+                forecast_due = (
+                    bool(live_views & {"nodes", "forecast"})
+                    and now >= next_forecast_refresh
+                )
                 if (
                     filesystem_due
                     or login_due
@@ -634,6 +650,7 @@ def dashboard(
                 tab_line(
                     active_view,
                     f"{len(clusters)} shown · {config_path.name}",
+                    visible_views,
                 ),
                 0,
                 screen_width,
@@ -1187,7 +1204,7 @@ def dashboard(
 
             else:
                 if config_editing_cluster is None:
-                    selection_count = SETTING_COUNT + len(editable_config.clusters)
+                    selection_count = CLUSTER_OFFSET + len(editable_config.clusters)
                     config_selection = min(
                         max(0, config_selection), selection_count - 1
                     )
@@ -1277,8 +1294,11 @@ def dashboard(
             if key == 9 or (backtab_key is not None and key == backtab_key):
                 if active_view == "estimate":
                     estimate_adjusting = False
-                view_index = VIEWS.index(active_view)
-                active_view = VIEWS[(view_index + 1) % len(VIEWS)]
+                view_index = visible_views.index(active_view)
+                direction = -1 if key == backtab_key else 1
+                active_view = visible_views[
+                    (view_index + direction) % len(visible_views)
+                ]
                 if active_view == "jobs":
                     jobs_selection_changed = True
             elif active_view == "usage" and key in (
@@ -1548,7 +1568,7 @@ def dashboard(
                 and config_editing_cluster is not None
                 and key == 27
             ):
-                config_selection = SETTING_COUNT + config_editing_cluster
+                config_selection = CLUSTER_OFFSET + config_editing_cluster
                 config_editing_cluster = None
                 config_message = "Returned to cluster list"
             elif (
@@ -1684,15 +1704,70 @@ def dashboard(
             elif (
                 active_view == "config"
                 and config_editing_cluster is None
+                and SETTING_COUNT <= config_selection < CLUSTER_OFFSET
+                and key
+                in (
+                    curses.KEY_LEFT,
+                    curses.KEY_RIGHT,
+                    ord(" "),
+                    10,
+                    13,
+                    curses.KEY_ENTER,
+                    ord("e"),
+                    ord("E"),
+                    ord("h"),
+                    ord("H"),
+                    curses.KEY_SR,
+                    curses.KEY_SF,
+                )
+            ):
+                tab_index = config_selection - SETTING_COUNT
+                settings = editable_config.settings
+                tab = settings.tab_order[tab_index]
+                if tab == "config":
+                    config_message = "Config is always enabled and stays last"
+                elif key in (curses.KEY_SR, curses.KEY_SF):
+                    direction = -1 if key == curses.KEY_SR else 1
+                    new_index = min(
+                        len(settings.tab_order) - 2, max(0, tab_index + direction)
+                    )
+                    if new_index != tab_index:
+                        settings.tab_order[tab_index], settings.tab_order[new_index] = (
+                            settings.tab_order[new_index],
+                            settings.tab_order[tab_index],
+                        )
+                        config_selection = SETTING_COUNT + new_index
+                        config_dirty = True
+                        config_message = f"Moved {VIEW_LABELS[tab]}; press s to apply"
+                else:
+                    enabled = tab not in settings.disabled_tabs
+                    desired = (
+                        False
+                        if key == curses.KEY_LEFT
+                        else True
+                        if key == curses.KEY_RIGHT
+                        else not enabled
+                    )
+                    if desired != enabled:
+                        if desired:
+                            settings.disabled_tabs.remove(tab)
+                        else:
+                            settings.disabled_tabs.append(tab)
+                        config_dirty = True
+                        state = "Enabled" if desired else "Disabled"
+                        config_message = f"{state} {VIEW_LABELS[tab]}; press s to apply"
+            elif (
+                active_view == "config"
+                and config_editing_cluster is None
                 and key
                 in (
                     curses.KEY_SR,
                     curses.KEY_SF,
                 )
             ):
-                cluster_index = config_selection - SETTING_COUNT
+                cluster_index = config_selection - CLUSTER_OFFSET
                 if cluster_index < 0:
-                    config_message = "Select a cluster card to move"
+                    config_message = "Select a tab or cluster card to move"
                 else:
                     direction = -1 if key == curses.KEY_SR else 1
                     new_index = min(
@@ -1708,7 +1783,7 @@ def dashboard(
                             clusters_to_order[new_index],
                             clusters_to_order[cluster_index],
                         )
-                        config_selection = SETTING_COUNT + new_index
+                        config_selection = CLUSTER_OFFSET + new_index
                         config_dirty = True
                         config_message = (
                             f"Moved {clusters_to_order[new_index].name}; "
@@ -1749,7 +1824,7 @@ def dashboard(
                 and config_editing_cluster is None
                 and key == curses.KEY_END
             ):
-                config_selection = SETTING_COUNT + len(editable_config.clusters) - 1
+                config_selection = CLUSTER_OFFSET + len(editable_config.clusters) - 1
             elif (
                 active_view == "config"
                 and config_editing_cluster is None
@@ -1776,7 +1851,7 @@ def dashboard(
                 elif config_selection < SETTING_COUNT:
                     config_message = "Use Left/Right, Space, or Enter for this setting"
                 else:
-                    cluster_index = config_selection - SETTING_COUNT
+                    cluster_index = config_selection - CLUSTER_OFFSET
                     config_editing_cluster = cluster_index
                     config_field_selection = 0
                     config_message = "Select any field; press s whenever ready"
@@ -1785,7 +1860,7 @@ def dashboard(
                 and config_editing_cluster is None
                 and key in (ord("c"), ord("C"))
             ):
-                cluster_index = config_selection - SETTING_COUNT
+                cluster_index = config_selection - CLUSTER_OFFSET
                 if cluster_index < 0:
                     config_message = "Select a cluster card to connect"
                 elif config_dirty:
@@ -1831,7 +1906,7 @@ def dashboard(
                 and config_editing_cluster is None
                 and key in (ord("h"), ord("H"))
             ):
-                cluster_index = config_selection - SETTING_COUNT
+                cluster_index = config_selection - CLUSTER_OFFSET
                 if cluster_index < 0:
                     config_message = "Select a cluster card to hide or show"
                 else:
@@ -1863,7 +1938,7 @@ def dashboard(
                     ClusterConfig(name=name, mode="local", focus="auto")
                 )
                 config_editing_cluster = len(editable_config.clusters) - 1
-                config_selection = SETTING_COUNT + config_editing_cluster
+                config_selection = CLUSTER_OFFSET + config_editing_cluster
                 config_field_selection = 0
                 config_dirty = True
                 config_message = "New local cluster; select Connection for SSH"
@@ -1872,9 +1947,9 @@ def dashboard(
                 and config_editing_cluster is None
                 and key in (ord("d"), ord("D"))
             ):
-                cluster_index = config_selection - SETTING_COUNT
+                cluster_index = config_selection - CLUSTER_OFFSET
                 if cluster_index < 0:
-                    config_message = "Global settings cannot be deleted"
+                    config_message = "Select a cluster card to delete"
                 elif len(editable_config.clusters) == 1:
                     config_message = "At least one cluster is required"
                 else:
@@ -1891,7 +1966,7 @@ def dashboard(
                             editable_config = candidate
                             config_selection = min(
                                 config_selection,
-                                SETTING_COUNT + len(editable_config.clusters) - 1,
+                                CLUSTER_OFFSET + len(editable_config.clusters) - 1,
                             )
                             config_dirty = True
                             config_message = f"Deleted {cluster_name}; press s to apply"
@@ -2020,20 +2095,20 @@ def dashboard(
                 horizontal_offsets[active_view] -= 4
             elif key == curses.KEY_RIGHT:
                 horizontal_offsets[active_view] += 4
-            elif key in (ord("r"), ord("R")) and not refresh_futures:
-                refresh_includes_filesystems = (
+            elif key in (ord("r"), ord("R")) and not refresh_futures and live_views:
+                refresh_includes_filesystems = "filesystems" in visible_views and (
                     active_view == "filesystems" or now >= next_filesystem_refresh
                 )
-                refresh_checks_login_nodes = (
+                refresh_checks_login_nodes = "logins" in visible_views and (
                     active_view == "logins" or now >= next_login_refresh
                 )
-                refresh_includes_schedule = (
-                    active_view == "forecast" or now >= next_forecast_refresh
-                )
-                refresh_includes_jobs = (
+                refresh_includes_schedule = bool(
+                    live_views & {"nodes", "forecast"}
+                ) and (active_view == "forecast" or now >= next_forecast_refresh)
+                refresh_includes_jobs = "jobs" in visible_views and (
                     active_view == "jobs" or now >= next_jobs_refresh
                 )
-                refresh_includes_history = (
+                refresh_includes_history = "jobs" in visible_views and (
                     active_view == "jobs" or now >= next_history_refresh
                 )
                 preferred_hosts = {cluster.name: cluster.host for cluster in clusters}

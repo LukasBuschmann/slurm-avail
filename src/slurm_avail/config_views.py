@@ -9,12 +9,13 @@ from pathlib import Path
 
 from .config import (
     BOOLEAN_SETTING_FIELDS,
+    CLUSTER_OFFSET,
     SETTING_COUNT,
     SETTING_FIELDS,
     AppConfig,
     ClusterConfig,
 )
-from .constants import LEGEND_WIDTH, Line
+from .constants import LEGEND_WIDTH, VIEW_LABELS, Line
 from .text import line, ownership_legend_lines, plain
 
 AUTHENTICATION_LABELS = {
@@ -194,7 +195,7 @@ def config_table(
         line(("DASHBOARD CONFIGURATION", "title")),
         plain(f"TOML  {config_path}"),
         plain(f"state: {state}"),
-        line(((message or "Select a setting or cluster card")[:120], "busy")),
+        line(((message or "Select a setting, tab, or cluster card")[:120], "busy")),
     ]
     body: list[Line] = [line(("GLOBAL SETTINGS", "title"))]
     selected_body_index = 0
@@ -215,9 +216,21 @@ def config_table(
         style = "selected" if selected else "normal"
         body.append(line((f"  {label:<28} {choices}", style)))
 
+    body.extend([plain(""), line(("TABS · display order", "title"))])
+    for offset, tab in enumerate(config.settings.tab_order):
+        selected = selection == SETTING_COUNT + offset
+        if selected:
+            selected_body_index = len(body)
+        enabled = tab not in config.settings.disabled_tabs
+        state = "[ON]  off" if enabled else "on  [OFF]"
+        if tab == "config":
+            state = "[ON]  always last"
+        style = "selected" if selected else "normal" if enabled else "offline"
+        body.append(line((f"  {VIEW_LABELS[tab]:<28} {state}", style)))
+
     body.extend([plain(""), line(("CLUSTERS", "title"))])
     for cluster_index, cluster in enumerate(config.clusters):
-        selection_index = SETTING_COUNT + cluster_index
+        selection_index = CLUSTER_OFFSET + cluster_index
         selected = selection == selection_index
         header_style = (
             "selected" if selected else "offline" if cluster.hidden else "title"
@@ -274,11 +287,11 @@ def config_legend_lines(dirty: bool) -> list[Line]:
     return [
         line(("CONFIG EDITOR", "title")),
         plain("-" * LEGEND_WIDTH),
-        plain("Enter/e  edit selected"),
+        plain("Enter/e  edit or toggle"),
         plain("←/→/Space  choose option"),
         plain("c  connect selected"),
-        plain("h  hide/show cluster"),
-        plain("Shift+↑/↓  move cluster"),
+        plain("h  toggle tab / cluster"),
+        plain("Shift+↑/↓  reorder"),
         plain("a  add cluster"),
         plain("d  delete cluster"),
         plain("s  save + apply"),

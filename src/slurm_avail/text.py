@@ -5,7 +5,7 @@ from __future__ import annotations
 import math
 from collections.abc import Iterable
 
-from .constants import GPU_LEVELS, Line, Span
+from .constants import GPU_LEVELS, VIEW_LABELS, VIEWS, Line, Span
 
 
 def line(*spans: Span) -> Line:
@@ -113,43 +113,13 @@ def free_meter(free: int, total: int) -> str:
     return GPU_LEVELS[index - 1]
 
 
-def tab_line(active_view: str, context: str) -> Line:
-    return line(
-        ("[NODES]", "title" if active_view == "nodes" else "normal"),
-        ("  ", "normal"),
-        (
-            "[FILESYSTEMS]",
-            "title" if active_view == "filesystems" else "normal",
-        ),
-        ("  ", "normal"),
-        (
-            "[LOGIN NODES]",
-            "title" if active_view == "logins" else "normal",
-        ),
-        ("  ", "normal"),
-        (
-            "[JOBS]",
-            "title" if active_view == "jobs" else "normal",
-        ),
-        ("  ", "normal"),
-        (
-            "[USAGE]",
-            "title" if active_view == "usage" else "normal",
-        ),
-        ("  ", "normal"),
-        (
-            "[ESTIMATE]",
-            "title" if active_view == "estimate" else "normal",
-        ),
-        ("  ", "normal"),
-        (
-            "[FORECAST]",
-            "title" if active_view == "forecast" else "normal",
-        ),
-        ("  ", "normal"),
-        (
-            "[CONFIG]",
-            "title" if active_view == "config" else "normal",
-        ),
-        (f"   {context} · Tab switches view", "busy"),
-    )
+def tab_line(active_view: str, context: str, views: tuple[str, ...] = VIEWS) -> Line:
+    result: Line = []
+    for view in views:
+        if result:
+            result.append(("  ", "normal"))
+        result.append(
+            (f"[{VIEW_LABELS[view]}]", "title" if active_view == view else "normal")
+        )
+    result.append((f"   {context} · Tab switches view", "busy"))
+    return result

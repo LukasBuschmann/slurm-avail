@@ -1,6 +1,8 @@
 version = 1
 
 [settings]
+tab_order = ["nodes", "filesystems", "logins", "jobs", "usage", "estimate", "forecast", "config"]
+disabled_tabs = []
 authenticate_on_startup = true
 control_persist_seconds = 3600
 node_refresh_seconds = 10

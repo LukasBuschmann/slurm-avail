@@ -14,7 +14,7 @@ from pathlib import Path
 from typing import TextIO
 
 from .collect import fetch_all_clusters
-from .config import AppConfig, active_cluster_configs, load_config
+from .config import AppConfig, active_cluster_configs, active_views, load_config
 from .constants import APP_NAME, DEFAULT_CONFIG_PATH, VIEWS
 from .output import (
     placeholder_clusters,
@@ -36,7 +36,7 @@ def package_version() -> str:
     try:
         return version("slurm-avail")
     except PackageNotFoundError:
-        return "0.4.0.dev0"
+        return "0.5.0.dev0"
 
 
 @contextlib.contextmanager
@@ -108,7 +108,7 @@ def main() -> int:
     parser.add_argument(
         "--view",
         choices=VIEWS,
-        help="initial view (default: config on first run, otherwise nodes)",
+        help="initial view (default: config on first run, otherwise first enabled tab)",
     )
     parser.add_argument(
         "--init",
@@ -135,13 +135,18 @@ def main() -> int:
     arguments = parser.parse_args()
     config_path = arguments.config.expanduser()
     first_run = not config_path.exists()
-    initial_view = (
-        "config"
-        if arguments.init or (first_run and arguments.view is None)
-        else arguments.view or "nodes"
-    )
     try:
         config = load_config(config_path)
+        views = active_views(config.settings)
+        initial_view = (
+            "config"
+            if arguments.init or (first_run and arguments.view is None)
+            else arguments.view or views[0]
+        )
+        if initial_view not in views:
+            raise ValueError(
+                f"tab '{initial_view}' is disabled; enable it in --view config"
+            )
         if initial_view in ("jobs", "usage"):
             jobs_scope_index = initial_jobs_scope_index(config, arguments.cluster)
             selected_cluster_index = max(0, jobs_scope_index - 1)
@@ -165,6 +170,7 @@ def main() -> int:
             render_estimate_once(
                 placeholder_clusters(config, arguments.user),
                 context,
+                config.settings,
             )
             return 0
         if initial_view == "usage":
@@ -190,7 +196,11 @@ def main() -> int:
                 }
                 results = {name: future.result() for name, future in futures.items()}
             render_usage_once(
-                history, [cluster.name for cluster in configs], results, context
+                history,
+                [cluster.name for cluster in configs],
+                results,
+                context,
+                config.settings,
             )
             return 0
         clusters = fetch_all_clusters(

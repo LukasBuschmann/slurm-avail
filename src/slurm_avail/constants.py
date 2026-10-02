@@ -33,6 +33,7 @@ VIEWS = (
     "forecast",
     "config",
 )
+VIEW_LABELS = {view: view.replace("logins", "login nodes").upper() for view in VIEWS}
 
 Span = tuple[str, str]
 Line = list[Span]

@@ -6,7 +6,7 @@ import time
 from pathlib import Path
 
 from .collect import cluster_user
-from .config import AppConfig, DashboardSettings, active_cluster_configs
+from .config import AppConfig, DashboardSettings, active_cluster_configs, active_views
 from .config_views import config_table
 from .constants import CLUSTER_WIDTH, GAP, LOGIN_TABLE_WIDTH, Line
 from .estimate_views import estimate_legend_lines, estimate_table
@@ -62,7 +62,7 @@ def render_once(
     context: str,
     settings: DashboardSettings,
 ) -> None:
-    print(spans_text(tab_line("nodes", context)))
+    print(spans_text(tab_line("nodes", context, active_views(settings))))
     print()
     headers = [cluster_header(cluster) for cluster in clusters]
     bodies = [cluster_body(cluster, colored=False) for cluster in clusters]
@@ -96,7 +96,7 @@ def render_filesystems_once(
     context: str,
     settings: DashboardSettings,
 ) -> None:
-    print(spans_text(tab_line("filesystems", context)))
+    print(spans_text(tab_line("filesystems", context, active_views(settings))))
     print()
     table = filesystem_table(clusters)
     legend = filesystem_legend_lines(
@@ -117,7 +117,7 @@ def render_logins_once(
     context: str,
     settings: DashboardSettings,
 ) -> None:
-    print(spans_text(tab_line("logins", context)))
+    print(spans_text(tab_line("logins", context, active_views(settings))))
     print()
     table = login_table(clusters)
     legend = login_legend_lines(
@@ -142,7 +142,7 @@ def render_forecast_once(
     selected_index: int,
     settings: DashboardSettings,
 ) -> None:
-    print(spans_text(tab_line("forecast", context)))
+    print(spans_text(tab_line("forecast", context, active_views(settings))))
     print()
     (
         headers,
@@ -190,7 +190,7 @@ def render_jobs_once(
     selected_index: int,
     settings: DashboardSettings,
 ) -> None:
-    print(spans_text(tab_line("jobs", context)))
+    print(spans_text(tab_line("jobs", context, active_views(settings))))
     print()
     headers, body, details, table_width, _selected_body, _selected_job = jobs_table(
         clusters,
@@ -217,8 +217,9 @@ def render_jobs_once(
 def render_estimate_once(
     clusters: list[Cluster],
     context: str,
+    settings: DashboardSettings | None = None,
 ) -> None:
-    print(spans_text(tab_line("estimate", context)))
+    print(spans_text(tab_line("estimate", context, active_views(settings))))
     print()
     headers, body, _selected_body, table_width = estimate_table(
         EstimateRequest(),
@@ -240,7 +241,11 @@ def render_estimate_once(
 
 
 def render_config_once(config: AppConfig, config_path: Path) -> None:
-    print(spans_text(tab_line("config", f"config {config_path}")))
+    print(
+        spans_text(
+            tab_line("config", f"config {config_path}", active_views(config.settings))
+        )
+    )
     print()
     headers, body, _selected = config_table(
         config,
@@ -258,8 +263,9 @@ def render_usage_once(
     names: list[str],
     results: dict[str, UsageResult | None],
     context: str,
+    settings: DashboardSettings | None = None,
 ) -> None:
-    print(spans_text(tab_line("usage", context)))
+    print(spans_text(tab_line("usage", context, active_views(settings))))
     headers, body = usage_table(history, names, results, width=100)
     for row in headers + body:
         print(spans_text(row))

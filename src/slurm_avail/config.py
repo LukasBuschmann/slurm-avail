@@ -8,9 +8,13 @@ import tomllib
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from .constants import VIEWS
+
 
 @dataclass
 class DashboardSettings:
+    tab_order: list[str] = field(default_factory=lambda: list(VIEWS))
+    disabled_tabs: list[str] = field(default_factory=list)
     authenticate_on_startup: bool = True
     control_persist_seconds: int = 3600
     node_refresh_seconds: int = 10
@@ -71,6 +75,7 @@ SETTING_FIELDS = (
 )
 BOOLEAN_SETTING_FIELDS = (("authenticate_on_startup", "Startup authentication"),)
 SETTING_COUNT = len(SETTING_FIELDS) + len(BOOLEAN_SETTING_FIELDS)
+CLUSTER_OFFSET = SETTING_COUNT + len(VIEWS)
 SETTING_LIMITS = {
     key: (minimum, maximum) for key, _label, minimum, maximum in SETTING_FIELDS
 }
@@ -93,6 +98,8 @@ def config_to_dict(config: AppConfig) -> dict[str, object]:
     return {
         "version": config.version,
         "settings": {
+            "tab_order": list(config.settings.tab_order),
+            "disabled_tabs": list(config.settings.disabled_tabs),
             **{
                 key: getattr(config.settings, key)
                 for key, _label, _minimum, _maximum in SETTING_FIELDS
@@ -133,6 +140,21 @@ def validate_config(config: AppConfig) -> None:
         raise ValueError(f"unsupported config version {config.version}")
     if not config.clusters:
         raise ValueError("at least one cluster is required")
+
+    for key in ("tab_order", "disabled_tabs"):
+        value = getattr(config.settings, key)
+        if not isinstance(value, list) or not all(isinstance(v, str) for v in value):
+            raise ValueError(f"settings.{key} must be an array of tab names")
+        if any(v not in VIEWS for v in value):
+            raise ValueError(f"settings.{key} contains an unknown tab name")
+        if len(value) != len(set(value)):
+            raise ValueError(f"settings.{key} must not contain duplicate tab names")
+    if "config" in config.settings.disabled_tabs:
+        raise ValueError("the Config tab cannot be disabled")
+    # Missing tabs inherit their default order, including newly introduced tabs.
+    config.settings.tab_order = [
+        v for v in dict.fromkeys([*config.settings.tab_order, *VIEWS]) if v != "config"
+    ] + ["config"]
 
     names: set[str] = set()
     for cluster in config.clusters:
@@ -201,6 +223,9 @@ def app_config_from_dict(data: object) -> AppConfig:
     if not isinstance(settings_data, dict):
         raise ValueError("settings must be a TOML table")
     settings = DashboardSettings()
+    for key in ("tab_order", "disabled_tabs"):
+        if key in settings_data:
+            setattr(settings, key, settings_data[key])
     for key, _label, _minimum, _maximum in SETTING_FIELDS:
         if key in settings_data:
             setattr(settings, key, settings_data[key])
@@ -289,6 +314,8 @@ def save_config(config: AppConfig, path: Path) -> None:
     temporary_path = path.parent / f".{path.name}.{os.getpid()}.tmp"
     try:
         lines = [f"version = {config.version}", "", "[settings]"]
+        for key in ("tab_order", "disabled_tabs"):
+            lines.append(f"{key} = {json.dumps(getattr(config.settings, key))}")
         for key, _label, _minimum, _maximum in SETTING_FIELDS:
             lines.append(f"{key} = {getattr(config.settings, key)}")
         for key, _label in BOOLEAN_SETTING_FIELDS:
@@ -361,3 +388,14 @@ def load_config(path: Path, create: bool = True) -> AppConfig:
 def active_cluster_configs(config: AppConfig) -> list[ClusterConfig]:
     """Return displayed clusters in their configured order."""
     return [cluster for cluster in config.clusters if not cluster.hidden]
+
+
+def active_views(settings: DashboardSettings | None = None) -> tuple[str, ...]:
+    """Return enabled tabs in order, always ending with Config."""
+    if settings is None:
+        return VIEWS
+    return tuple(
+        v
+        for v in dict.fromkeys([*settings.tab_order, *VIEWS])
+        if v != "config" and v not in settings.disabled_tabs
+    ) + ("config",)

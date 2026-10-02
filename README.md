@@ -116,6 +116,19 @@ can also be hidden or reordered, while refresh and retry intervals are shared
 dashboard settings. SSH clusters can use an SSH key or ask OpenSSH to prompt
 for a password. Everything is persisted in a readable TOML file.
 
+The **Tabs** section controls which tabs appear and their order. Select a tab
+and press `Space`, `Enter`, or `h` to enable or disable it. Left disables it;
+Right enables it. Use `Shift+Up/Down` to move it, then `s` to save and apply.
+Config is always enabled and always last, even when every other tab is disabled.
+The dashboard starts on the first enabled tab, and `Tab` / `Shift+Tab` navigate
+the configured order. An explicit `--view` must name an enabled tab.
+
+These preferences are stored as `tab_order` and `disabled_tabs` arrays under
+`[settings]`. Existing configurations keep all tabs enabled in the default order.
+Tabs omitted from `tab_order` are appended before Config, so new tabs remain
+discoverable after updates. Disable a tab through `disabled_tabs`, not by
+removing it from `tab_order`.
+
 ## Installation
 
 ### Standalone Linux executable
@@ -326,7 +339,7 @@ slurm-avail --config /path/to/config.toml
 
 | Key | Action |
 | --- | --- |
-| `Tab` | Switch view |
+| `Tab` / `Shift+Tab` | Next / previous enabled view |
 | Arrow keys | Scroll or navigate |
 | `Page Up` / `Page Down` | Scroll by page |
 | `Home` / `End` | Jump to top or bottom |
@@ -341,7 +354,7 @@ slurm-avail --config /path/to/config.toml
 
 The Config view shows its editing controls in the legend. In particular, use
 `a` to add, `Enter` to edit, `h` to hide or show, `Shift+Up/Down` to reorder,
-`c` to connect a cluster using Password, and `s` to save clusters. In
+`c` to connect a cluster using Password, and `s` to save changes. In
 the cluster editor, use `Up/Down` to select a field and `Left/Right`, `Space`,
 or `Enter` to choose from fixed options. Press `Enter` or `e` on text fields.
 You can press `s` from any field without stepping through the rest of the form.
