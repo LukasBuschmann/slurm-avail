@@ -28,6 +28,7 @@ VIEWS = (
     "filesystems",
     "logins",
     "jobs",
+    "usage",
     "estimate",
     "forecast",
     "config",

@@ -86,6 +86,8 @@ from .ssh_auth import (
     open_interactive_session,
 )
 from .text import clipped_line, tab_line, visible_length
+from .usage import UsageHistory
+from .usage_views import usage_legend_lines, usage_table
 
 
 def init_colors() -> dict[str, int]:
@@ -365,6 +367,9 @@ def dashboard(
     active_view = initial_view
     forecast_cluster_index = initial_cluster_index
     jobs_cluster_index = initial_jobs_scope_index
+    usage = UsageHistory()
+    usage.scope = initial_jobs_scope_index
+    usage_executor = concurrent.futures.ThreadPoolExecutor(max_workers=4)
     jobs_job_indices: dict[str, int] = {}
     jobs_selection_changed = True
     estimate_request = EstimateRequest()
@@ -839,6 +844,44 @@ def dashboard(
                     fixed_legend_x,
                     styles,
                 )
+            elif active_view == "usage":
+                results = usage.update(
+                    usage_executor,
+                    runtime_config,
+                    user_override,
+                    config_generation,
+                    {cluster.name: cluster.host for cluster in clusters},
+                )
+                headers, body = usage_table(
+                    usage,
+                    [cluster.name for cluster in clusters],
+                    results,
+                    content_width,
+                    max(2, min(7, (viewport_height - 11) // 2)),
+                )
+                body_height = max(1, viewport_height - len(headers))
+                max_vertical = max(0, len(body) - body_height)
+                vertical_offsets[active_view] = min(
+                    max(0, vertical_offsets[active_view]),
+                    max_vertical,
+                )
+                page_height = body_height
+                offset = vertical_offsets[active_view]
+                rows = headers + body[offset : offset + body_height]
+                for row, spans in enumerate(rows):
+                    draw_spans(
+                        screen, content_y + row, 0, spans, 0, content_width, styles
+                    )
+                draw_fixed_legend(
+                    screen,
+                    usage_legend_lines(),
+                    content_y,
+                    screen_height,
+                    screen_width,
+                    fixed_divider_x,
+                    fixed_legend_x,
+                    styles,
+                )
             elif active_view == "jobs":
                 scope_key = (
                     "ALL"
@@ -1238,6 +1281,37 @@ def dashboard(
                 active_view = VIEWS[(view_index + 1) % len(VIEWS)]
                 if active_view == "jobs":
                     jobs_selection_changed = True
+            elif active_view == "usage" and key in (
+                ord("+"),
+                ord("="),
+                ord("-"),
+                ord("_"),
+            ):
+                usage.zoom(-1 if key in (ord("+"), ord("=")) else 1)
+                vertical_offsets[active_view] = 0
+            elif active_view == "usage" and key in (curses.KEY_LEFT, curses.KEY_RIGHT):
+                usage.move(-1 if key == curses.KEY_LEFT else 1)
+                vertical_offsets[active_view] = 0
+            elif active_view == "usage" and key == curses.KEY_END:
+                usage.follow_now = True
+                usage.refresh()
+                vertical_offsets[active_view] = 0
+            elif active_view == "usage" and key in (ord("r"), ord("R")):
+                usage.refresh()
+            elif active_view == "usage" and key in (
+                ord("["),
+                ord("{"),
+                ord("]"),
+                ord("}"),
+            ):
+                direction = -1 if key in (ord("["), ord("{")) else 1
+                usage.scope = (usage.scope + direction) % (len(clusters) + 1)
+                vertical_offsets[active_view] = 0
+            elif active_view == "usage" and ord("0") <= key <= ord("0") + min(
+                9, len(clusters)
+            ):
+                usage.scope = key - ord("0")
+                vertical_offsets[active_view] = 0
             elif active_view == "jobs" and key in (ord("["), ord("{")):
                 jobs_cluster_index = (jobs_cluster_index - 1) % (len(clusters) + 1)
                 vertical_offsets[active_view] = 0
@@ -1982,6 +2056,8 @@ def dashboard(
             future.cancel()
         for future in estimate_futures:
             future.cancel()
+        usage.reset(-1)
         cancel_active_commands()
+        usage_executor.shutdown(wait=True, cancel_futures=True)
         executor.shutdown(wait=True, cancel_futures=True)
         close_control_sessions(control_targets)

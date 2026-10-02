@@ -24,6 +24,8 @@ from .node_views import (
     login_table,
 )
 from .text import tab_line
+from .usage import UsageHistory, UsageResult
+from .usage_views import usage_table
 
 
 def placeholder_clusters(
@@ -247,5 +249,17 @@ def render_config_once(config: AppConfig, config_path: Path) -> None:
         False,
         "",
     )
+    for row in headers + body:
+        print(spans_text(row))
+
+
+def render_usage_once(
+    history: UsageHistory,
+    names: list[str],
+    results: dict[str, UsageResult | None],
+    context: str,
+) -> None:
+    print(spans_text(tab_line("usage", context)))
+    headers, body = usage_table(history, names, results, width=100)
     for row in headers + body:
         print(spans_text(row))

@@ -47,6 +47,50 @@ estimates are presented as estimates, not predictions made by the dashboard.
 The history window and its refresh interval are configurable; they default to
 seven days and one minute.
 
+**Usage** graphs your allocated CPU-hours and GPU-hours over time, with separate
+scales and totals for the selected period. It opens at the last 30 days and
+combines every shown cluster; select All or one cluster with `[` / `]` or
+`0` / `1`–`9`. Hours are displayed as whole numbers. Vertical axes use rounded,
+evenly spaced ticks, with `k` or `M` only when every tick remains distinct.
+Timeline labels simplify from clock times to dates, months, and years as you
+zoom out, and include year changes where needed. Press `+` to zoom in or `-`
+to zoom out through 6 hours, 1 day, 7 days, 30 days, 90 days, 1 year, 3 years,
+5 years, and 10 years. Left and Right move by one period; `End` returns to now.
+
+Bars use calendar hours, days, weeks, months, quarters, or years depending on
+the range and available terminal width. For example, 90 days uses daily bars
+when they fit, or weekly bars on a narrower terminal. The header identifies
+the period used. The first and last bars include only time inside the selected
+range. Wider bars do not multiply the totals, and local calendar days account
+for daylight-saving changes.
+
+Usage counts allocated resources multiplied by elapsed wall time, including
+CPU allocations in GPU jobs and time spent in failed or cancelled jobs. It does
+not measure processor activity or apply billing weights. Jobs spanning multiple
+columns contribute time to each column they overlap. Running jobs count only
+up to the displayed end time.
+
+Accounting is fetched separately from live cluster data, cached in memory, and
+refreshed every five minutes while following the present. Press `r` to refresh
+manually. Existing graphs remain visible during refresh, with an indication that
+they show previous data. A failed refresh retains that snapshot and marks it as
+stale. In the scope selector, `x` replaces the number of an unavailable cluster,
+`!` marks incomplete records, and `~` means loading or refreshing. Select a cluster
+to see its error details above the graphs. Its number shortcut still works.
+All totals are labelled partial when any selected cluster has missing data.
+
+Usage uses standard `sacct` allocation fields and requires readable accounting
+history, including `AllocTRES` for GPU counts. SSH queries initialize a login
+shell for site configuration. Older `sacct` versions that reject `--array` are
+retried without that option. The collector has been checked against Slurm
+19.05.2 and 25.05.9; this is not a guarantee for every version or site setup.
+No dashboard service needs to have been running during the requested period.
+Slurm can silently omit purged records, so an empty older period does not
+guarantee that no jobs ran. CPU counts follow each site's Slurm configuration
+and can represent hardware threads. GPU counts follow the recorded GRES,
+including configured GPU slices; totals do not normalize different hardware's
+performance or reconstruct allocation changes within a single accounting record.
+
 **Estimate** compares one hypothetical resource request across selected
 clusters. Edit the node, task, CPU, memory, GPU, time, partition, account, QoS,
 and constraint fields, choose the clusters, then press `t`. Each cluster runs
@@ -139,7 +183,7 @@ On first launch, the Config view opens automatically and creates:
 
 Select the initial local cluster and press `Enter` to edit it, or press `a` to
 add an SSH cluster. Press `s` to save and apply, then use `Tab` to switch
-between Nodes, Filesystems, Login Nodes, Jobs, Estimate, Forecast, and Config.
+between Nodes, Filesystems, Login Nodes, Jobs, Usage, Estimate, Forecast, and Config.
 
 You can return directly to configuration with:
 
@@ -290,8 +334,9 @@ slurm-avail --config /path/to/config.toml
 | `t` | Run the request in the Estimate view |
 | `Enter` | Adjust an Estimate field or activate its Run Test row |
 | `Space` | Include or exclude a cluster in the Estimate view |
-| `+` / `-` | Change forecast resolution |
-| `[` / `]` | Change Jobs scope or Forecast cluster |
+| `+` / `-` | Change Forecast resolution or Usage time range |
+| `[` / `]` | Change Jobs/Usage scope or Forecast cluster |
+| Left / Right, `End` in Usage | Move through history, return to now |
 | `q` | Quit |
 
 The Config view shows its editing controls in the legend. In particular, use
@@ -332,6 +377,8 @@ slurm-avail --help
 slurm-avail --version
 slurm-avail --once
 slurm-avail --view jobs
+slurm-avail --view usage --cluster all
+slurm-avail --once --view usage --cluster 1
 slurm-avail --view forecast --cluster 2
 ```
 

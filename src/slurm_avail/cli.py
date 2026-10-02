@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import concurrent.futures
 import contextlib
 import curses
 import signal
@@ -24,8 +25,10 @@ from .output import (
     render_jobs_once,
     render_logins_once,
     render_once,
+    render_usage_once,
 )
 from .tui import dashboard
+from .usage import UsageHistory, fetch_usage
 
 
 def package_version() -> str:
@@ -33,7 +36,7 @@ def package_version() -> str:
     try:
         return version("slurm-avail")
     except PackageNotFoundError:
-        return "0.2.0.dev0"
+        return "0.4.0.dev0"
 
 
 @contextlib.contextmanager
@@ -120,7 +123,7 @@ def main() -> int:
     parser.add_argument(
         "--cluster",
         help=(
-            "initial Jobs scope or Forecast cluster name/number (Jobs defaults to All)"
+            "initial Jobs/Usage scope or Forecast cluster name/number (default: All)"
         ),
     )
     parser.add_argument(
@@ -139,7 +142,7 @@ def main() -> int:
     )
     try:
         config = load_config(config_path)
-        if initial_view == "jobs":
+        if initial_view in ("jobs", "usage"):
             jobs_scope_index = initial_jobs_scope_index(config, arguments.cluster)
             selected_cluster_index = max(0, jobs_scope_index - 1)
         else:
@@ -162,6 +165,32 @@ def main() -> int:
             render_estimate_once(
                 placeholder_clusters(config, arguments.user),
                 context,
+            )
+            return 0
+        if initial_view == "usage":
+            history = UsageHistory()
+            history.scope = jobs_scope_index
+            configs = active_cluster_configs(config)
+            selected = (
+                configs
+                if history.scope == 0
+                else configs[history.scope - 1 : history.scope]
+            )
+            with concurrent.futures.ThreadPoolExecutor(max_workers=4) as executor:
+                futures = {
+                    cluster.name: executor.submit(
+                        fetch_usage,
+                        cluster,
+                        config.settings,
+                        arguments.user,
+                        history.start,
+                        history.end,
+                    )
+                    for cluster in selected
+                }
+                results = {name: future.result() for name, future in futures.items()}
+            render_usage_once(
+                history, [cluster.name for cluster in configs], results, context
             )
             return 0
         clusters = fetch_all_clusters(
