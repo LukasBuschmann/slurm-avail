@@ -3,9 +3,15 @@ from __future__ import annotations
 import subprocess
 from datetime import datetime
 
+import pytest
+
 from slurm_avail.collect import (
+    SlurmUnavailableError,
     data_command,
+    endpoint_failure,
     expand_hostlist,
+    fetch_cluster,
+    fetch_from_endpoint,
     history_command,
     parse_filesystems,
     parse_history,
@@ -13,6 +19,7 @@ from slurm_avail.collect import (
     parse_memory_mb,
     parse_nodes,
     parse_schedule,
+    run_ssh,
     ssh_authentication_required,
     ssh_error_message,
 )
@@ -43,6 +50,118 @@ def test_ssh_authentication_failure_gets_a_safe_state() -> None:
 
     assert ssh_authentication_required(error)
     assert ssh_error_message(error) == "authentication required"
+
+
+def test_login_remote_environment_wraps_command_in_bash(monkeypatch) -> None:
+    captured: list[list[str]] = []
+
+    def run(command, *, check, timeout):
+        captured.append(list(command))
+        return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
+
+    monkeypatch.setattr("slurm_avail.collect.run_captured", run)
+    run_ssh(
+        ClusterConfig(
+            name="REMOTE",
+            addresses=["login.example.org"],
+            remote_shell="login",
+        ),
+        "login.example.org",
+        "researcher",
+        "printf '%s\\n' ready",
+        20,
+        8,
+    )
+
+    assert captured[0][-1].startswith("/bin/bash -lc ")
+    assert "printf" in captured[0][-1]
+
+
+def test_scheduler_failure_means_endpoint_was_reached() -> None:
+    kind, reachable, message = endpoint_failure(
+        SlurmUnavailableError("Slurm configuration unavailable"),
+        "ssh",
+    )
+
+    assert (kind, reachable) == ("scheduler", True)
+    assert message == "Slurm configuration unavailable"
+
+
+def test_transport_failure_is_distinct_from_scheduler_failure() -> None:
+    error = subprocess.CalledProcessError(
+        255,
+        ["ssh", "login.example.org"],
+        stderr="ssh: connect to host login.example.org port 22: Connection refused",
+    )
+
+    kind, reachable, _message = endpoint_failure(error, "ssh")
+
+    assert kind == "unreachable"
+    assert reachable is False
+
+
+def test_remote_slurm_command_failure_is_a_scheduler_failure() -> None:
+    error = subprocess.CalledProcessError(
+        1,
+        ["ssh", "login.example.org"],
+        stderr="scontrol: fatal: Could not establish a configuration source",
+    )
+
+    kind, reachable, _message = endpoint_failure(error, "ssh")
+
+    assert kind == "scheduler"
+    assert reachable is True
+
+
+def test_cluster_keeps_reachable_endpoint_when_slurm_is_unavailable(
+    monkeypatch,
+) -> None:
+    def fail(*_args, **_kwargs):
+        raise SlurmUnavailableError("Slurm configuration unavailable")
+
+    monkeypatch.setattr("slurm_avail.collect.fetch_from_endpoint", fail)
+    cluster = fetch_cluster(
+        ClusterConfig(
+            name="REMOTE",
+            addresses=["login1.example.org", "login2.example.org"],
+        ),
+        DashboardSettings(retry_delay_seconds=0),
+        None,
+        include_filesystems=False,
+        check_login_nodes=False,
+        include_schedule=False,
+        include_jobs=False,
+        include_history=False,
+        preferred_host=None,
+    )
+
+    assert cluster.failure_kind == "scheduler"
+    assert cluster.failure_label == "SLURM UNAVAILABLE"
+    assert all(node.reachable for node in cluster.login_nodes)
+    assert {node.failure_kind for node in cluster.login_nodes} == {"scheduler"}
+
+
+def test_empty_slurm_node_response_is_a_scheduler_failure(monkeypatch) -> None:
+    def run(*_args, **_kwargs):
+        return subprocess.CompletedProcess(
+            [],
+            0,
+            stdout="__USER__researcher\n__NODES__\n",
+            stderr="scontrol: fatal: Could not establish a configuration source\n",
+        )
+
+    monkeypatch.setattr("slurm_avail.collect.run_endpoint", run)
+    with pytest.raises(SlurmUnavailableError, match="configuration source"):
+        fetch_from_endpoint(
+            ClusterConfig(name="REMOTE", addresses=["login.example.org"]),
+            "login.example.org",
+            "researcher",
+            DashboardSettings(),
+            include_filesystems=False,
+            include_schedule=False,
+            include_jobs=False,
+            include_history=False,
+        )
 
 
 def test_parse_filesystem_posix_kilobytes() -> None:

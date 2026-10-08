@@ -7,6 +7,6 @@ from importlib.metadata import PackageNotFoundError, version
 try:
     __version__ = version("slurm-avail")
 except PackageNotFoundError:
-    __version__ = "0.5.0.dev0"
+    __version__ = "0.5.1.dev0"
 
 __all__ = ["__version__"]

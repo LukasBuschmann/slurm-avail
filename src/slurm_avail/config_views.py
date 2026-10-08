@@ -63,6 +63,13 @@ CLUSTER_FIELDS = (
         "choice",
         ("auto", "cpu", "gpu"),
     ),
+    ClusterField(
+        "remote_shell",
+        "Remote environment",
+        "Remote environment",
+        "choice",
+        ("direct", "login"),
+    ),
     ClusterField("slurm_bin_path", "Slurm bin path", "Slurm bin path, blank for PATH"),
     ClusterField(
         "filesystems",
@@ -94,6 +101,7 @@ def visible_cluster_fields(cluster: ClusterConfig) -> tuple[ClusterField, ...]:
                 "addresses",
                 "user",
                 "authentication",
+                "remote_shell",
             }
         )
     return tuple(field for field in CLUSTER_FIELDS if field.key not in hidden_keys)
@@ -274,6 +282,7 @@ def config_table(
                     (user, "mine" if cluster.user else "busy"),
                 ),
                 plain(f"      endpoints      {endpoints}"),
+                plain(f"      environment    {cluster.remote_shell}"),
                 plain(f"      Slurm bin      {slurm_path}"),
                 plain(f"      filesystems    {filesystems}"),
                 plain(f"      exclusions     {excluded}"),
@@ -385,6 +394,7 @@ def cluster_editor_legend_lines(dirty: bool) -> list[Line]:
         plain("require typing."),
         plain("Comma separates lists."),
         plain("Blank user uses SSH config."),
+        plain("Login loads the remote profile."),
         plain("Blank Slurm path uses PATH."),
         plain(""),
         line(("STATE", "title")),

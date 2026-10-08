@@ -226,9 +226,14 @@ def test_forecast_colors_current_users_usage_and_reservation() -> None:
     assert "forecast_mine_reserved" in styles
 
 
-def test_down_cluster_views_do_not_expose_transport_error() -> None:
+def test_unreachable_cluster_views_do_not_expose_transport_error() -> None:
     error = "Command '['ssh', '-l', 'researcher', 'login.example'] failed"
-    cluster = Cluster(name="GPU", host="login", error=error)
+    cluster = Cluster(
+        name="GPU",
+        host="login",
+        failure_kind="unreachable",
+        error=error,
+    )
 
     header_text = "\n".join(
         "".join(value for value, _style in row) for row in cluster_header(cluster)
@@ -243,10 +248,25 @@ def test_down_cluster_views_do_not_expose_transport_error() -> None:
     )
     body_text = "\n".join("".join(value for value, _style in row) for row in body)
 
-    assert "DOWN" in header_text
-    assert "UNAVAILABLE" not in header_text
+    assert "SSH UNREACHABLE" in header_text
     assert error not in header_text
-    assert body_text == "CLUSTER DOWN"
+    assert body_text == "SSH UNREACHABLE"
+
+
+def test_scheduler_failure_is_distinct_from_ssh_failure() -> None:
+    cluster = Cluster(
+        name="GPU",
+        host="login",
+        failure_kind="scheduler",
+        error="Slurm configuration unavailable",
+    )
+
+    header_text = "\n".join(
+        "".join(value for value, _style in row) for row in cluster_header(cluster)
+    )
+
+    assert "SLURM UNAVAILABLE" in header_text
+    assert "SSH UNREACHABLE" not in header_text
 
 
 def test_authentication_required_is_distinct_from_cluster_down() -> None:

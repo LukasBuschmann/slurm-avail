@@ -29,6 +29,7 @@ def test_config_round_trip_and_private_permissions(tmp_path: Path) -> None:
                 user="researcher",
                 authentication="interactive",
                 focus="gpu",
+                remote_shell="login",
                 filesystems=["/home", "/scratch"],
                 slurm_bin_path="/opt/slurm/bin",
                 exclude_partitions=["interactive"],
@@ -42,6 +43,7 @@ def test_config_round_trip_and_private_permissions(tmp_path: Path) -> None:
     assert stat.S_IMODE(path.stat().st_mode) == 0o600
     config_text = path.read_text(encoding="utf-8")
     assert 'authentication = "interactive"' in config_text
+    assert 'remote_shell = "login"' in config_text
     assert "authenticate_on_startup = false" in config_text
     settings_section = config_text.split("[[clusters]]", 1)[0]
     cluster_section = config_text.split("[[clusters]]", 1)[1]
@@ -74,6 +76,22 @@ def test_invalid_authentication_mode_is_rejected(tmp_path: Path) -> None:
     )
 
     with pytest.raises(ValueError, match="authentication must be batch or interactive"):
+        save_config(config, path)
+
+
+def test_invalid_remote_shell_is_rejected(tmp_path: Path) -> None:
+    path = tmp_path / "config.toml"
+    config = AppConfig(
+        clusters=[
+            ClusterConfig(
+                name="REMOTE",
+                addresses=["login.example.org"],
+                remote_shell="fish",
+            )
+        ]
+    )
+
+    with pytest.raises(ValueError, match="remote_shell must be direct or login"):
         save_config(config, path)
 
 

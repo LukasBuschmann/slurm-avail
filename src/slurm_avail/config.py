@@ -42,6 +42,7 @@ class ClusterConfig:
     user: str | None = None
     authentication: str = "batch"
     focus: str = "auto"
+    remote_shell: str = "direct"
     hidden: bool = False
     filesystems: list[str] = field(default_factory=list)
     slurm_bin_path: str = ""
@@ -117,6 +118,7 @@ def config_to_dict(config: AppConfig) -> dict[str, object]:
                 "user": cluster.user,
                 "authentication": cluster.authentication,
                 "focus": cluster.focus,
+                "remote_shell": cluster.remote_shell,
                 "hidden": cluster.hidden,
                 "filesystems": cluster.filesystems,
                 "slurm_bin_path": cluster.slurm_bin_path,
@@ -162,6 +164,7 @@ def validate_config(config: AppConfig) -> None:
         cluster.mode = cluster.mode.strip().lower()
         cluster.authentication = cluster.authentication.strip().lower()
         cluster.focus = cluster.focus.strip().lower()
+        cluster.remote_shell = cluster.remote_shell.strip().lower()
         cluster.addresses = [
             address.strip() for address in cluster.addresses if address.strip()
         ]
@@ -195,6 +198,8 @@ def validate_config(config: AppConfig) -> None:
             )
         if cluster.focus not in ("auto", "cpu", "gpu"):
             raise ValueError(f"{cluster.name}: focus must be auto, cpu, or gpu")
+        if cluster.remote_shell not in ("direct", "login"):
+            raise ValueError(f"{cluster.name}: remote_shell must be direct or login")
         if not isinstance(cluster.hidden, bool):
             raise ValueError(f"{cluster.name}: hidden must be true or false")
 
@@ -267,15 +272,22 @@ def app_config_from_dict(data: object) -> AppConfig:
         mode = raw_cluster.get("mode", "ssh")
         authentication = raw_cluster.get("authentication", "batch")
         focus = raw_cluster.get("focus", "auto")
+        remote_shell = raw_cluster.get("remote_shell", "direct")
         hidden = raw_cluster.get("hidden", False)
         slurm_bin_path = raw_cluster.get("slurm_bin_path", "")
         if not all(
             isinstance(value, str)
-            for value in (mode, authentication, focus, slurm_bin_path)
+            for value in (
+                mode,
+                authentication,
+                focus,
+                remote_shell,
+                slurm_bin_path,
+            )
         ):
             raise ValueError(
-                f"clusters[{index}] mode, authentication, focus, and "
-                "slurm_bin_path must be strings"
+                f"clusters[{index}] mode, authentication, focus, remote_shell, "
+                "and slurm_bin_path must be strings"
             )
         if not isinstance(hidden, bool):
             raise ValueError(f"clusters[{index}].hidden must be true or false")
@@ -290,6 +302,7 @@ def app_config_from_dict(data: object) -> AppConfig:
                 user=user,
                 authentication=authentication,
                 focus=focus,
+                remote_shell=remote_shell,
                 hidden=hidden,
                 filesystems=string_list(
                     raw_cluster.get("filesystems", []),
@@ -342,6 +355,7 @@ def save_config(config: AppConfig, path: Path) -> None:
                 [
                     f"authentication = {json.dumps(cluster.authentication)}",
                     f"focus = {json.dumps(cluster.focus)}",
+                    f"remote_shell = {json.dumps(cluster.remote_shell)}",
                     f"hidden = {str(cluster.hidden).lower()}",
                     "filesystems = ["
                     + ", ".join(

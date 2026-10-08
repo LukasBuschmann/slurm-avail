@@ -4,6 +4,27 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
+FAILURE_LABELS = {
+    "auth": "AUTH REQUIRED",
+    "timeout": "SSH TIMEOUT",
+    "unreachable": "SSH UNREACHABLE",
+    "scheduler": "SLURM UNAVAILABLE",
+    "data": "DATA ERROR",
+    "command": "COMMAND ERROR",
+    "local": "LOCAL ERROR",
+}
+
+
+FAILURE_STYLES = {
+    "auth": "reserved",
+    "timeout": "reserved",
+    "unreachable": "drained",
+    "scheduler": "reserved",
+    "data": "busy",
+    "command": "drained",
+    "local": "drained",
+}
+
 
 @dataclass
 class Node:
@@ -201,6 +222,7 @@ class LoginNode:
     reachable: bool = False
     used: bool = False
     auth_required: bool = False
+    failure_kind: str | None = None
     error: str | None = None
 
 
@@ -229,6 +251,7 @@ class Cluster:
     fairshare_error: str | None = None
     loading: bool = False
     auth_required: bool = False
+    failure_kind: str | None = None
     error: str | None = None
 
     @property
@@ -238,3 +261,13 @@ class Cluster:
         if self.focus == "cpu":
             return False
         return any(node.gpu_total for node in self.nodes)
+
+    @property
+    def failure_label(self) -> str:
+        kind = "auth" if self.auth_required else self.failure_kind
+        return FAILURE_LABELS.get(kind or "", "UNAVAILABLE")
+
+    @property
+    def failure_style(self) -> str:
+        kind = "auth" if self.auth_required else self.failure_kind
+        return FAILURE_STYLES.get(kind or "", "drained")

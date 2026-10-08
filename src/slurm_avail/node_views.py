@@ -179,11 +179,23 @@ def login_table(clusters: list[Cluster]) -> list[Line]:
             elif login_node.auth_required:
                 status_text = "AUTH"
                 status_style = "reserved"
+            elif login_node.failure_kind == "timeout":
+                status_text = "TIMEOUT"
+                status_style = "reserved"
+            elif login_node.failure_kind == "scheduler":
+                status_text = "SLURM"
+                status_style = "reserved"
+            elif login_node.failure_kind == "data":
+                status_text = "PARSE"
+                status_style = "busy"
+            elif login_node.failure_kind in ("command", "local"):
+                status_text = "ERROR"
+                status_style = "drained"
             elif login_node.reachable:
                 status_text = "OK"
                 status_style = "free"
             else:
-                status_text = "FAIL"
+                status_text = "SSH"
                 status_style = "drained"
             role_text = "DATA" if login_node.used else ""
             detail = (login_node.error or "").replace("\n", " ")[:38]
@@ -233,12 +245,10 @@ def cluster_header(cluster: Cluster) -> list[Line]:
         return header
 
     if cluster.error:
-        status = "AUTH REQUIRED" if cluster.auth_required else "DOWN"
-        status_style = "reserved" if cluster.auth_required else "drained"
         header.extend(
             [
                 plain(""),
-                line((status, status_style)),
+                line((cluster.failure_label, cluster.failure_style)),
                 plain(""),
                 plain(""),
                 plain(""),
@@ -594,7 +604,11 @@ def login_legend_lines(
         plain("-" * LEGEND_WIDTH),
         line(("OK", "free"), (" reachable", "normal")),
         line(("AUTH", "reserved"), (" authentication required", "normal")),
-        line(("FAIL", "drained"), (" unavailable", "normal")),
+        line(("TIMEOUT", "reserved"), (" request timed out", "normal")),
+        line(("SSH", "drained"), (" endpoint unreachable", "normal")),
+        line(("SLURM", "reserved"), (" scheduler unavailable", "normal")),
+        line(("PARSE", "busy"), (" invalid scheduler data", "normal")),
+        line(("ERROR", "drained"), (" remote command failed", "normal")),
         line(("DATA", "cpu"), (" current source", "normal")),
         *ownership_legend_lines(),
         plain("automatic failover"),

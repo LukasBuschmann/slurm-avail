@@ -158,6 +158,14 @@ date +%z
 """
 
 
+class SlurmUnavailableError(RuntimeError):
+    """The endpoint answered, but its Slurm client returned no node data."""
+
+
+class DataCollectionError(RuntimeError):
+    """The endpoint answered with an invalid or incomplete dashboard response."""
+
+
 def history_command(
     history_days: int,
     reference_time: datetime | None = None,
@@ -984,6 +992,54 @@ def ssh_error_message(error: BaseException) -> str:
     return str(error)
 
 
+def endpoint_failure(
+    error: BaseException,
+    mode: str,
+) -> tuple[str, bool, str]:
+    """Classify a failed request and report whether the endpoint answered."""
+    message = ssh_error_message(error)
+    if isinstance(error, SlurmUnavailableError):
+        return "scheduler", True, message
+    if isinstance(error, DataCollectionError):
+        return "data", True, message
+    if ssh_authentication_required(error):
+        return "auth", False, message
+    if isinstance(error, subprocess.TimeoutExpired):
+        return "timeout", False, message
+    if isinstance(error, subprocess.CalledProcessError):
+        stderr = error.stderr or ""
+        if re.search(
+            r"(?:^|\n)(?:bash: )?(?:scontrol|squeue|sacct|sprio|sshare|srun):|"
+            r"Slurm configuration|configuration source|slurmctld",
+            stderr,
+            re.IGNORECASE,
+        ):
+            return "scheduler", True, message
+        if mode == "ssh" and error.returncode == 255:
+            return "unreachable", False, message
+        return ("local" if mode == "local" else "command"), True, message
+    if isinstance(error, FileNotFoundError):
+        return ("local" if mode == "local" else "command"), False, message
+    if isinstance(error, OSError):
+        return ("local" if mode == "local" else "command"), False, message
+    return ("local" if mode == "local" else "data"), True, message
+
+
+def preferred_failure(
+    failures: list[tuple[str, str]],
+) -> tuple[str, str]:
+    priorities = {
+        "scheduler": 70,
+        "data": 60,
+        "command": 50,
+        "local": 50,
+        "auth": 40,
+        "timeout": 30,
+        "unreachable": 20,
+    }
+    return max(failures, key=lambda item: priorities.get(item[0], 0))
+
+
 def ssh_config_user(hostname: str) -> str:
     try:
         result = run_captured(
@@ -1018,6 +1074,8 @@ def run_ssh(
     timeout: int,
     connect_timeout: int,
 ) -> subprocess.CompletedProcess[str]:
+    if cluster_config.remote_shell == "login":
+        remote_command = f"/bin/bash -lc {shlex.quote(remote_command)}"
     return run_captured(
         [
             "ssh",
@@ -1238,33 +1296,33 @@ def fetch_from_endpoint(
             "__HISTORY__\n"
         )
         if not marker:
-            raise RuntimeError("remote history marker missing")
+            raise DataCollectionError("remote history marker missing")
     if include_schedule:
         node_and_user_output, marker, schedule_output = node_and_user_output.partition(
             "__SCHEDULE__\n"
         )
         if not marker:
-            raise RuntimeError("remote schedule marker missing")
+            raise DataCollectionError("remote schedule marker missing")
     elif include_jobs:
         node_and_user_output, marker, jobs_output = node_and_user_output.partition(
             "__JOBS__\n"
         )
         if not marker:
-            raise RuntimeError("remote jobs marker missing")
+            raise DataCollectionError("remote jobs marker missing")
     if include_filesystems:
         node_and_user_output, marker, filesystem_output = (
             node_and_user_output.partition("__FILESYSTEMS__\n")
         )
         if not marker:
-            raise RuntimeError("remote filesystem marker missing")
+            raise DataCollectionError("remote filesystem marker missing")
     user_output, node_marker, node_output = node_and_user_output.partition(
         "__NODES__\n"
     )
     if not node_marker or not user_output.startswith("__USER__"):
-        raise RuntimeError("remote node metadata marker missing")
+        raise DataCollectionError("remote node metadata marker missing")
     current_user = user_output.removeprefix("__USER__").strip()
     if not current_user:
-        raise RuntimeError("remote user missing")
+        raise DataCollectionError("remote user missing")
     scheduler_data = SchedulerData()
     if include_schedule:
         scheduler_data = parse_schedule(schedule_output, current_user)
@@ -1280,7 +1338,17 @@ def fetch_from_endpoint(
         cluster_config.exclude_partitions,
     )
     if not nodes:
-        raise RuntimeError("no Slurm node data returned")
+        if "NodeName=" in node_output:
+            raise DataCollectionError("no Slurm nodes remain after filtering")
+        detail = next(
+            (
+                line.strip()
+                for line in (result.stderr or "").splitlines()
+                if line.strip()
+            ),
+            "Slurm returned no node data",
+        )
+        raise SlurmUnavailableError(detail)
     return Cluster(
         name=cluster_config.name,
         host=endpoint,
@@ -1322,11 +1390,17 @@ def probe_endpoint(
         )
         return LoginNode(hostname=endpoint, checked=True, reachable=True)
     except (OSError, subprocess.SubprocessError) as error:
+        failure_kind, reachable, message = endpoint_failure(
+            error,
+            cluster_config.mode,
+        )
         return LoginNode(
             hostname=endpoint,
             checked=True,
-            auth_required=ssh_authentication_required(error),
-            error=ssh_error_message(error),
+            reachable=reachable,
+            auth_required=failure_kind == "auth",
+            failure_kind=failure_kind,
+            error=message,
         )
 
 
@@ -1352,8 +1426,7 @@ def fetch_cluster(
 
     login_status = {hostname: LoginNode(hostname=hostname) for hostname in endpoints}
     cluster: Cluster | None = None
-    last_error = "no login nodes configured"
-    auth_required = False
+    failures: list[tuple[str, str]] = []
 
     for hostname in ordered_hosts:
         for attempt in range(settings.retries_per_address + 1):
@@ -1376,14 +1449,18 @@ def fetch_cluster(
                 )
                 break
             except (OSError, RuntimeError, subprocess.SubprocessError) as error:
-                endpoint_auth_required = ssh_authentication_required(error)
-                auth_required = auth_required or endpoint_auth_required
-                last_error = ssh_error_message(error)
+                failure_kind, reachable, message = endpoint_failure(
+                    error,
+                    cluster_config.mode,
+                )
+                failures.append((failure_kind, message))
                 login_status[hostname] = LoginNode(
                     hostname=hostname,
                     checked=True,
-                    auth_required=endpoint_auth_required,
-                    error=last_error,
+                    reachable=reachable,
+                    auth_required=failure_kind == "auth",
+                    failure_kind=failure_kind,
+                    error=message,
                 )
                 if attempt < settings.retries_per_address and wait_or_cancel(
                     settings.retry_delay_seconds
@@ -1404,6 +1481,11 @@ def fetch_cluster(
 
     statuses = [login_status[hostname] for hostname in endpoints]
     if cluster is None:
+        failure_kind, last_error = (
+            preferred_failure(failures)
+            if failures
+            else ("data", "no login nodes configured")
+        )
         return Cluster(
             name=cluster_config.name,
             host=preferred_host or endpoints[0],
@@ -1412,7 +1494,8 @@ def fetch_cluster(
             focus=cluster_config.focus,
             filesystem_paths=tuple(cluster_config.filesystems),
             login_nodes=statuses,
-            auth_required=auth_required,
+            auth_required=failure_kind == "auth",
+            failure_kind=failure_kind,
             error=last_error,
         )
     cluster.login_nodes = statuses
@@ -1554,6 +1637,7 @@ def merge_cluster_refresh(
                         reachable=old_login.reachable,
                         used=login.hostname == refreshed.host,
                         auth_required=old_login.auth_required,
+                        failure_kind=old_login.failure_kind,
                         error=old_login.error,
                     )
                 )

@@ -41,6 +41,7 @@ def test_cluster_editor_only_shows_relevant_connection_fields() -> None:
     assert "authentication" not in {
         item.key for item in visible_cluster_fields(cluster)
     }
+    assert "remote_shell" not in {item.key for item in visible_cluster_fields(cluster)}
 
 
 def test_authentication_choices_use_plain_labels() -> None:

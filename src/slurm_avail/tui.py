@@ -500,6 +500,7 @@ def dashboard(
                 except Exception as error:
                     refreshed = copy.deepcopy(previous)
                     refreshed.loading = False
+                    refreshed.failure_kind = "data"
                     refreshed.error = str(error)
                 clusters[cluster_index] = merge_cluster_refresh(
                     previous,

@@ -33,7 +33,8 @@ configured on each cluster.
 
 **Login Nodes** shows which SSH endpoints are reachable, which endpoint is
 currently supplying data, and whether automatic failover is available. It also
-distinguishes an unreachable host from an endpoint that needs authentication.
+separates SSH failures, authentication prompts, timeouts, unavailable Slurm
+services, and invalid scheduler responses.
 
 **Jobs** combines the current user's live queue with recent accounting history.
 Its default All scope lists jobs from every configured cluster; numbered
@@ -245,6 +246,7 @@ addresses = ["login1.capella.hpc.tu-dresden.de", "login2.capella.hpc.tu-dresden.
 user = "USERNAME"
 authentication = "batch" # SSH key
 focus = "gpu"
+remote_shell = "direct"
 hidden = false
 filesystems = ["/home", "/software", "/data/horse", "/data/walrus", "/data/narwhal", "/data/quokka", "/data/cat"]
 slurm_bin_path = "/opt/slurm/current/bin"
@@ -257,6 +259,7 @@ addresses = ["login1.alpha.hpc.tu-dresden.de", "login2.alpha.hpc.tu-dresden.de"]
 user = "USERNAME"
 authentication = "batch" # SSH key
 focus = "gpu"
+remote_shell = "direct"
 hidden = false
 filesystems = ["/home", "/software", "/data/horse", "/data/walrus", "/data/narwhal", "/data/quokka", "/data/cat"]
 slurm_bin_path = "/opt/slurm/current/bin"
@@ -269,9 +272,10 @@ addresses = ["login1.barnard.hpc.tu-dresden.de", "login2.barnard.hpc.tu-dresden.
 user = "USERNAME"
 authentication = "batch" # SSH key
 focus = "cpu"
+remote_shell = "login"
 hidden = false
 filesystems = ["/home", "/software", "/data/horse", "/data/walrus", "/data/narwhal", "/data/quokka", "/data/cat"]
-slurm_bin_path = "/opt/slurm/current/bin"
+slurm_bin_path = "/usr/bin"
 exclude_partitions = ["interactive"]
 
 [[clusters]]
@@ -281,6 +285,7 @@ addresses = ["login1.romeo.hpc.tu-dresden.de", "login2.romeo.hpc.tu-dresden.de"]
 user = "USERNAME"
 authentication = "batch" # SSH key
 focus = "cpu"
+remote_shell = "direct"
 hidden = false
 filesystems = ["/home", "/software", "/data/horse", "/data/walrus", "/data/narwhal", "/data/quokka", "/data/cat"]
 slurm_bin_path = "/opt/slurm/current/bin"
@@ -293,6 +298,11 @@ For a smaller generic example, see [config.example.toml](config.example.toml).
 The `user` field is optional; when omitted, OpenSSH configuration determines
 the user. The Slurm path is also optional when `scontrol` and `squeue` are
 already available on the endpoint's `PATH`.
+
+Set `remote_shell = "login"` when a cluster initializes Slurm in its Bash
+login profile. Direct mode uses the normal non-interactive OpenSSH command
+environment. The TU Dresden example uses login mode for Barnard because its
+profile supplies `SLURM_CONF`.
 
 ### SSH login methods
 
@@ -381,6 +391,7 @@ On each configured cluster endpoint:
   jobs remain available if accounting is disabled or unavailable)
 - `/bin/sh` and standard POSIX utilities including `id`, `date`, `awk`,
   `sort`, `sed`, and `grep`
+- `/bin/bash` when `remote_shell = "login"` is configured
 - `df` and `tail` for filesystem monitoring (`timeout` is used when present)
 
 ## Command-line usage
