@@ -1,10 +1,13 @@
 from __future__ import annotations
 
 from slurm_avail.jobs_views import (
+    JobGroupKey,
     fuzzy_job_name_match,
+    job_groups_for_scope,
     job_row,
     jobs_filter_line,
     jobs_for_scope,
+    jobs_selection_count,
     jobs_table,
     priority_distribution_rows,
     sticky_jobs_headers,
@@ -134,6 +137,113 @@ def test_jobs_table_reports_when_filter_matches_nothing() -> None:
     assert details == []
 
 
+def test_jobs_table_groups_names_with_five_job_preview_and_summary_details() -> None:
+    jobs = [named_job(str(index), "array-task") for index in range(1, 9)]
+    jobs[0].state = "RUNNING"
+    jobs[1].start = 1_787_188_250
+    jobs[1].scheduled_nodes = ("cpu01",)
+    cluster = Cluster(name="CPU", host="login", jobs=jobs)
+
+    _headers, body, details, _width, selected_body, selected_item = jobs_table(
+        [cluster],
+        0,
+        0,
+    )
+    body_text = "\n".join("".join(value for value, _style in row) for row in body)
+    detail_text = "\n".join("".join(value for value, _style in row) for row in details)
+
+    assert selected_item == 0
+    assert selected_body == 0
+    group_row = "".join(value for value, _style in body[0])
+    assert group_row.rstrip() == "▾ array-task"
+    assert body_text.count("array-task") == 1
+    assert "… 3 more" in body_text
+    assert "NAME" in "".join(value for value, _style in _headers[-2])
+    assert "".join(value for value, _style in _headers[-2]).lstrip().startswith("NAME")
+    assert "JOB GROUP" in detail_text
+    assert "name        array-task" in detail_text
+    assert "scope       8 current jobs" in detail_text
+    assert "1 running   7 pending" in detail_text
+    assert "1 planned   0 estimate   6 no estimate" in detail_text
+    assert jobs_selection_count([cluster], 0) == 1
+
+    singleton = named_job("9", "single-task")
+    cluster.jobs.append(singleton)
+    _headers, aligned_body, *_rest = jobs_table([cluster], 0, 0)
+    grouped_child = "".join(value for value, _style in aligned_body[1])
+    singleton_row = next(
+        "".join(value for value, _style in row)
+        for row in aligned_body
+        if "single-task" in "".join(value for value, _style in row)
+    )
+    assert group_row.index("array-task") == singleton_row.index("single-task")
+    assert grouped_child.index("CPU") == singleton_row.index("CPU")
+
+
+def test_job_groups_keep_current_and_history_sections_separate() -> None:
+    cluster = Cluster(
+        name="CPU",
+        host="login",
+        jobs=[named_job("1", "same-name"), named_job("2", "same-name")],
+        past_jobs=[
+            named_job("3", "same-name", historical=True),
+            named_job("4", "same-name", historical=True),
+        ],
+    )
+
+    groups = job_groups_for_scope([cluster], 0)
+
+    assert [(group.key.historical, len(group.entries)) for group in groups] == [
+        (False, 2),
+        (True, 2),
+    ]
+
+
+def test_jobs_group_drilldown_shows_every_matching_job() -> None:
+    jobs = [named_job(str(index), "array-task") for index in range(1, 9)]
+    cluster = Cluster(name="CPU", host="login", jobs=jobs)
+    key = JobGroupKey("array-task", False)
+
+    _headers, body, details, _width, selected_body, selected_item = jobs_table(
+        [cluster],
+        0,
+        5,
+        drilldown=key,
+    )
+    body_text = "\n".join("".join(value for value, _style in row) for row in body)
+
+    assert selected_item == 5
+    assert selected_body == 5
+    assert len(body) == 8
+    assert body_text.count("array-task") == 8
+    assert "…" not in body_text
+    assert "SELECTED JOB 6" in "\n".join(
+        "".join(value for value, _style in row) for row in details
+    )
+    assert jobs_selection_count([cluster], 0, drilldown=key) == 8
+
+
+def test_jobs_name_grouping_can_be_disabled() -> None:
+    cluster = Cluster(
+        name="CPU",
+        host="login",
+        jobs=[named_job("1", "array-task"), named_job("2", "array-task")],
+    )
+
+    _headers, body, details, *_rest = jobs_table(
+        [cluster],
+        0,
+        0,
+        group_by_name=False,
+    )
+    text = "\n".join("".join(value for value, _style in row) for row in body)
+    detail_text = "\n".join("".join(value for value, _style in row) for row in details)
+
+    assert "2 jobs" not in text
+    assert text.count("array-task") == 2
+    assert "SELECTED JOB 1" in detail_text
+
+
 def test_jobs_table_shows_scheduler_placement_and_priority_details() -> None:
     job = UserJob(
         job_id="3931173",
@@ -199,6 +309,9 @@ def test_jobs_table_shows_scheduler_placement_and_priority_details() -> None:
     text = "\n".join(
         "".join(value for value, _style in row) for row in headers + body + details
     )
+    live_header = "".join(value for value, _style in headers[-2])
+    body_text = "\n".join("".join(value for value, _style in row) for row in body)
+    detail_text = "\n".join("".join(value for value, _style in row) for row in details)
     styles = [style for row in body for _value, style in row]
 
     assert selected_row == 0
@@ -209,6 +322,12 @@ def test_jobs_table_shows_scheduler_placement_and_priority_details() -> None:
     assert "CPUS" in text
     assert "MEMORY" in text
     assert "GPUS" in text
+    assert "PLACEMENT" in live_header
+    assert "JOB" not in live_header
+    assert "STATE" not in live_header
+    assert "PRIORITY" not in live_header
+    assert "3931173" not in body_text
+    assert "SELECTED JOB 3931173" in detail_text
     assert "STATUS / REASON" not in text
     assert "reason Priority" in text
     assert "time limit 08:00:00  nodes 1  CPUs 32" in text
@@ -444,6 +563,12 @@ def test_jobs_table_separates_history_and_keeps_selected_details_separate() -> N
     assert "ENDED" in body_text
     assert "SUBMITTED" not in body_text
     assert "TIME LIMIT" in body_text
+    history_header = next(
+        "".join(value for value, _style in row)
+        for row in body
+        if any("RESULT" in value for value, _style in row)
+    )
+    assert "JOB" not in history_header
     assert "EXIT" not in body_text
     assert "1×h100" in body_text
     assert all(style == "selected" for _value, style in body[selected_body])

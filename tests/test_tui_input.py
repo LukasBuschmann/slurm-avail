@@ -2,7 +2,8 @@ from __future__ import annotations
 
 import curses
 
-from slurm_avail.tui import read_keypress
+from slurm_avail.constants import LEGEND_WIDTH
+from slurm_avail.tui import LEFT_PADDING, draw_spans, panel_layout, read_keypress
 
 
 class InputScreen:
@@ -47,3 +48,30 @@ def test_direction_change_starts_a_new_batch():
 
     assert first == (curses.KEY_DOWN, 2, curses.KEY_UP)
     assert second == (curses.KEY_UP, 2, ord("q"))
+
+
+def test_tui_drawing_reserves_a_left_margin():
+    class DrawScreen:
+        def __init__(self):
+            self.writes = []
+
+        def getmaxyx(self):
+            return 10, 80
+
+        def addstr(self, y, x, text, style):
+            self.writes.append((y, x, text, style))
+
+    screen = DrawScreen()
+    draw_spans(
+        screen,  # type: ignore[arg-type]
+        0,
+        0,
+        [("content", "normal")],
+        0,
+        20,
+        {"normal": 0},
+    )
+
+    assert screen.writes == [(0, LEFT_PADDING, "content", 0)]
+    _content_width, _divider_x, legend_x = panel_layout(80)
+    assert legend_x + LEFT_PADDING == 80 - LEGEND_WIDTH

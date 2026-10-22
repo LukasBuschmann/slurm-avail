@@ -16,6 +16,7 @@ class DashboardSettings:
     tab_order: list[str] = field(default_factory=lambda: list(VIEWS))
     disabled_tabs: list[str] = field(default_factory=list)
     authenticate_on_startup: bool = True
+    group_jobs_by_name: bool = True
     control_persist_seconds: int = 3600
     node_refresh_seconds: int = 10
     filesystem_refresh_seconds: int = 60
@@ -74,7 +75,10 @@ SETTING_FIELDS = (
     ("retry_delay_seconds", "Delay between retries", 0, 60),
     ("forecast_horizon_days", "Forecast horizon days", 1, 3650),
 )
-BOOLEAN_SETTING_FIELDS = (("authenticate_on_startup", "Startup authentication"),)
+BOOLEAN_SETTING_FIELDS = (
+    ("authenticate_on_startup", "Startup authentication"),
+    ("group_jobs_by_name", "Group jobs by name"),
+)
 SETTING_COUNT = len(SETTING_FIELDS) + len(BOOLEAN_SETTING_FIELDS)
 CLUSTER_OFFSET = SETTING_COUNT + len(VIEWS)
 SETTING_LIMITS = {

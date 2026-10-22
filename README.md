@@ -47,6 +47,11 @@ A fixed inspector at the bottom follows the selected row and shows its full
 timing and result information. For pending jobs it also exposes weighted
 `sprio` factors and account and user fair-share data from `sshare`. Scheduler
 estimates are presented as estimates, not predictions made by the dashboard.
+Jobs with the same name are grouped by default. The shared name acts as a
+heading, with up to five matching jobs listed beneath it and an indication when
+more exist. The inspector summarizes running, pending, planned, and estimated
+counts. Press `Enter` to open the complete list for that name. Disable
+**Group jobs by name** in Config to restore one row per job.
 The history window and its refresh interval are configurable; they default to
 seven days and one minute.
 
@@ -232,6 +237,7 @@ version = 1
 
 [settings]
 authenticate_on_startup = true
+group_jobs_by_name = true
 control_persist_seconds = 3600
 node_refresh_seconds = 10
 filesystem_refresh_seconds = 60

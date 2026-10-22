@@ -65,10 +65,12 @@ from .forecast_views import (
     forecast_table,
 )
 from .jobs_views import (
+    JobGroupKey,
     jobs_filter_line,
-    jobs_for_scope,
     jobs_legend_lines,
+    jobs_selection_count,
     jobs_table,
+    selected_job_group,
     sticky_jobs_headers,
 )
 from .models import EstimateRequest, EstimateResult
@@ -95,6 +97,7 @@ from .usage import UsageHistory
 from .usage_views import usage_legend_lines, usage_table
 
 CTRL_F = ord("f") & 0x1F
+LEFT_PADDING = 1
 REPEATED_NAVIGATION_KEYS = frozenset(
     {
         curses.KEY_UP,
@@ -231,6 +234,7 @@ def draw_spans(
     position = canvas_x
     visible_start = horizontal_offset
     visible_end = horizontal_offset + screen_width
+    terminal_width = screen.getmaxyx()[1]
 
     for text, style_name in spans:
         span_start = position
@@ -242,13 +246,17 @@ def draw_spans(
         start = max(span_start, visible_start)
         end = min(span_end, visible_end)
         fragment = text[start - span_start : end - span_start]
-        x = start - visible_start
+        x = LEFT_PADDING + start - visible_start
+        if x >= terminal_width:
+            continue
+        fragment = fragment[: terminal_width - x]
         with contextlib.suppress(curses.error):
             screen.addstr(y, x, fragment, styles.get(style_name, curses.A_NORMAL))
 
 
 def panel_layout(screen_width: int) -> tuple[int, int, int]:
-    legend_x = max(0, screen_width - LEGEND_WIDTH)
+    drawable_width = max(1, screen_width - LEFT_PADDING)
+    legend_x = max(0, drawable_width - LEGEND_WIDTH)
     content_width = max(1, legend_x - GAP)
     divider_x = content_width + 1
     return content_width, divider_x, legend_x
@@ -447,6 +455,8 @@ def dashboard(
     jobs_name_filter = ""
     jobs_filter_editing = False
     jobs_selection_changed = True
+    jobs_drilldown: JobGroupKey | None = None
+    jobs_drilldown_index = 0
     estimate_request = EstimateRequest()
     estimate_selection = 0
     estimate_selected_clusters = {cluster.name for cluster in clusters}
@@ -977,6 +987,12 @@ def dashboard(
                     request_count,
                 )
             elif active_view == "jobs":
+                if (
+                    jobs_drilldown is not None
+                    and not runtime_config.settings.group_jobs_by_name
+                ):
+                    jobs_drilldown = None
+                    jobs_drilldown_index = 0
                 filter_line = jobs_filter_line(
                     clusters, jobs_cluster_index, jobs_name_filter, jobs_filter_editing
                 )
@@ -987,7 +1003,11 @@ def dashboard(
                     if jobs_cluster_index == 0
                     else clusters[jobs_cluster_index - 1].name
                 )
-                selected_job_index = jobs_job_indices.get(scope_key, 0)
+                selected_job_index = (
+                    jobs_drilldown_index
+                    if jobs_drilldown is not None
+                    else jobs_job_indices.get(scope_key, 0)
+                )
                 (
                     headers,
                     body,
@@ -1000,8 +1020,13 @@ def dashboard(
                     jobs_cluster_index,
                     selected_job_index,
                     jobs_name_filter,
+                    runtime_config.settings.group_jobs_by_name,
+                    jobs_drilldown,
                 )
-                jobs_job_indices[scope_key] = selected_job_index
+                if jobs_drilldown is not None:
+                    jobs_drilldown_index = selected_job_index
+                else:
+                    jobs_job_indices[scope_key] = selected_job_index
                 legend = jobs_legend_lines(
                     age_seconds=jobs_age_seconds,
                     refreshing=(
@@ -1016,6 +1041,8 @@ def dashboard(
                     history_refresh_seconds=(
                         runtime_config.settings.jobs_history_refresh_seconds
                     ),
+                    group_by_name=runtime_config.settings.group_jobs_by_name,
+                    drilldown=jobs_drilldown is not None,
                 )
                 header_height = len(headers)
                 available_below_header = max(1, jobs_viewport_height - header_height)
@@ -1386,6 +1413,8 @@ def dashboard(
             screen.refresh()
             key, key_repeat, pending_key = read_keypress(screen, pending_key)
             if active_view == "jobs" and key == CTRL_F:
+                jobs_drilldown = None
+                jobs_drilldown_index = 0
                 if jobs_filter_editing or jobs_name_filter:
                     jobs_name_filter = ""
                     jobs_filter_editing = False
@@ -1482,11 +1511,15 @@ def dashboard(
                 vertical_offsets[active_view] = 0
             elif active_view == "jobs" and key in (ord("["), ord("{")):
                 jobs_cluster_index = (jobs_cluster_index - 1) % (len(clusters) + 1)
+                jobs_drilldown = None
+                jobs_drilldown_index = 0
                 vertical_offsets[active_view] = 0
                 horizontal_offsets[active_view] = 0
                 jobs_selection_changed = True
             elif active_view == "jobs" and key in (ord("]"), ord("}")):
                 jobs_cluster_index = (jobs_cluster_index + 1) % (len(clusters) + 1)
+                jobs_drilldown = None
+                jobs_drilldown_index = 0
                 vertical_offsets[active_view] = 0
                 horizontal_offsets[active_view] = 0
                 jobs_selection_changed = True
@@ -1496,6 +1529,8 @@ def dashboard(
                 selected_index = key - ord("0")
                 if selected_index != jobs_cluster_index:
                     jobs_cluster_index = selected_index
+                    jobs_drilldown = None
+                    jobs_drilldown_index = 0
                     vertical_offsets[active_view] = 0
                     horizontal_offsets[active_view] = 0
                     jobs_selection_changed = True
@@ -1505,10 +1540,17 @@ def dashboard(
                     if jobs_cluster_index == 0
                     else clusters[jobs_cluster_index - 1].name
                 )
-                selected_job = jobs_job_indices.get(scope_key, 0)
+                selected_job = (
+                    jobs_drilldown_index
+                    if jobs_drilldown is not None
+                    else jobs_job_indices.get(scope_key, 0)
+                )
                 next_job = max(0, selected_job - key_repeat)
                 if next_job != selected_job:
-                    jobs_job_indices[scope_key] = next_job
+                    if jobs_drilldown is not None:
+                        jobs_drilldown_index = next_job
+                    else:
+                        jobs_job_indices[scope_key] = next_job
                     jobs_selection_changed = True
             elif active_view == "jobs" and key == curses.KEY_DOWN:
                 scope_key = (
@@ -1516,17 +1558,51 @@ def dashboard(
                     if jobs_cluster_index == 0
                     else clusters[jobs_cluster_index - 1].name
                 )
-                selected_job = jobs_job_indices.get(scope_key, 0)
-                job_count = len(
-                    jobs_for_scope(
-                        clusters,
-                        jobs_cluster_index,
-                        jobs_name_filter,
-                    )
+                selected_job = (
+                    jobs_drilldown_index
+                    if jobs_drilldown is not None
+                    else jobs_job_indices.get(scope_key, 0)
+                )
+                job_count = jobs_selection_count(
+                    clusters,
+                    jobs_cluster_index,
+                    jobs_name_filter,
+                    runtime_config.settings.group_jobs_by_name,
+                    jobs_drilldown,
                 )
                 next_job = min(max(0, job_count - 1), selected_job + key_repeat)
                 if next_job != selected_job:
-                    jobs_job_indices[scope_key] = next_job
+                    if jobs_drilldown is not None:
+                        jobs_drilldown_index = next_job
+                    else:
+                        jobs_job_indices[scope_key] = next_job
+                    jobs_selection_changed = True
+            elif active_view == "jobs" and key == 27 and jobs_drilldown is not None:
+                jobs_drilldown = None
+                jobs_drilldown_index = 0
+                vertical_offsets[active_view] = 0
+                jobs_selection_changed = True
+            elif (
+                active_view == "jobs"
+                and jobs_drilldown is None
+                and key in (10, 13, curses.KEY_ENTER)
+                and runtime_config.settings.group_jobs_by_name
+            ):
+                scope_key = (
+                    "ALL"
+                    if jobs_cluster_index == 0
+                    else clusters[jobs_cluster_index - 1].name
+                )
+                group = selected_job_group(
+                    clusters,
+                    jobs_cluster_index,
+                    jobs_job_indices.get(scope_key, 0),
+                    jobs_name_filter,
+                )
+                if group is not None and group.grouped:
+                    jobs_drilldown = group.key
+                    jobs_drilldown_index = 0
+                    vertical_offsets[active_view] = 0
                     jobs_selection_changed = True
             elif (
                 active_view == "estimate"
@@ -2166,6 +2242,8 @@ def dashboard(
                     )
                     jobs_cluster_index = min(jobs_cluster_index, len(clusters))
                     jobs_job_indices.clear()
+                    jobs_drilldown = None
+                    jobs_drilldown_index = 0
                     jobs_selection_changed = True
                     last_node_refresh = None
                     last_filesystem_refresh = None
@@ -2223,6 +2301,8 @@ def dashboard(
                     )
                     jobs_cluster_index = min(jobs_cluster_index, len(clusters))
                     jobs_job_indices.clear()
+                    jobs_drilldown = None
+                    jobs_drilldown_index = 0
                     jobs_selection_changed = True
                     last_node_refresh = None
                     last_filesystem_refresh = None

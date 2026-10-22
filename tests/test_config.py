@@ -19,6 +19,7 @@ def test_config_round_trip_and_private_permissions(tmp_path: Path) -> None:
     expected = AppConfig(
         settings=DashboardSettings(
             authenticate_on_startup=False,
+            group_jobs_by_name=False,
             control_persist_seconds=900,
             node_refresh_seconds=12,
         ),
@@ -45,6 +46,7 @@ def test_config_round_trip_and_private_permissions(tmp_path: Path) -> None:
     assert 'authentication = "interactive"' in config_text
     assert 'remote_shell = "login"' in config_text
     assert "authenticate_on_startup = false" in config_text
+    assert "group_jobs_by_name = false" in config_text
     settings_section = config_text.split("[[clusters]]", 1)[0]
     cluster_section = config_text.split("[[clusters]]", 1)[1]
     assert "control_persist_seconds = 900" in settings_section
@@ -172,6 +174,7 @@ mode = "local"
     config = load_config(path, create=False)
 
     assert config.settings.authenticate_on_startup is True
+    assert config.settings.group_jobs_by_name is True
 
 
 def test_startup_authentication_setting_must_be_boolean(tmp_path: Path) -> None:

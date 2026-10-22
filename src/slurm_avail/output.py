@@ -196,6 +196,7 @@ def render_jobs_once(
         clusters,
         selected_index,
         0,
+        group_by_name=settings.group_jobs_by_name,
     )
     legend = jobs_legend_lines(
         age_seconds=0,
@@ -204,6 +205,7 @@ def render_jobs_once(
         history_age_seconds=0,
         history_refreshing=False,
         history_refresh_seconds=settings.jobs_history_refresh_seconds,
+        group_by_name=settings.group_jobs_by_name,
     )
     table_rows = headers + body + details
     total_height = max(len(table_rows), len(legend))

@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import math
 import re
+from collections import Counter
+from dataclasses import dataclass
 from datetime import datetime
 
 from .constants import JOBS_TABLE_WIDTH, LEGEND_WIDTH, Line
@@ -11,22 +13,42 @@ from .models import Cluster, FairshareAssociation, PriorityFactors, UserJob
 from .text import line, plain, visible_length
 
 CLUSTER_WIDTH = 10
-JOB_WIDTH = 11
 NAME_WIDTH = 20
-STATE_WIDTH = 10
 RESULT_WIDTH = 13
 TIME_LIMIT_WIDTH = 11
 NODES_WIDTH = 6
 CPUS_WIDTH = 6
 MEMORY_WIDTH = 9
 GPUS_WIDTH = 14
-PRIORITY_WIDTH = 9
 START_WIDTH = 15
 PLACEMENT_WIDTH = 11
 ELAPSED_WIDTH = 11
 FACTOR_BAR_WIDTH = 20
 PRIORITY_HISTOGRAM_WIDTH = 64
 PRIORITY_LEVELS = "▁▂▃▄▅▆▇█"
+GROUP_PREVIEW_COUNT = 5
+GROUP_MARKER = "▾ "
+GROUP_GUTTER = "  "
+
+
+@dataclass(frozen=True)
+class JobGroupKey:
+    """Stable identity for a live or historical group of equally named jobs."""
+
+    name: str
+    historical: bool
+
+
+@dataclass(frozen=True)
+class JobGroup:
+    """One selectable item in the grouped jobs list."""
+
+    key: JobGroupKey
+    entries: tuple[tuple[Cluster, UserJob], ...]
+
+    @property
+    def grouped(self) -> bool:
+        return len(self.entries) > 1
 
 
 def clipped_cell(value: str, width: int) -> str:
@@ -117,14 +139,6 @@ def placement_label(job: UserJob) -> tuple[str, str]:
     return "NO ESTIMATE", "busy"
 
 
-def priority_label(job: UserJob) -> str:
-    if job.is_running or job.historical:
-        return "—"
-    if job.priority_factors is not None:
-        return str(job.priority_factors.total)
-    return job.priority or "—"
-
-
 def state_style(job: UserJob) -> str:
     state = job.state.split(maxsplit=1)[0].rstrip("+").upper()
     if job.historical:
@@ -192,6 +206,82 @@ def jobs_for_scope(
     ]
 
 
+def job_groups_for_scope(
+    clusters: list[Cluster],
+    selected_scope_index: int,
+    name_filter: str = "",
+    group_by_name: bool = True,
+) -> list[JobGroup]:
+    """Return selectable jobs, combining exact names within each table section."""
+    entries = jobs_for_scope(clusters, selected_scope_index, name_filter)
+    if not group_by_name:
+        return [
+            JobGroup(
+                JobGroupKey(job.name, job.historical),
+                ((cluster, job),),
+            )
+            for cluster, job in entries
+        ]
+
+    grouped: dict[JobGroupKey, list[tuple[Cluster, UserJob]]] = {}
+    for cluster, job in entries:
+        key = JobGroupKey(job.name, job.historical)
+        grouped.setdefault(key, []).append((cluster, job))
+    return [
+        JobGroup(key, tuple(group_entries)) for key, group_entries in grouped.items()
+    ]
+
+
+def jobs_in_group(
+    clusters: list[Cluster],
+    selected_scope_index: int,
+    key: JobGroupKey,
+    name_filter: str = "",
+) -> list[tuple[Cluster, UserJob]]:
+    return [
+        entry
+        for entry in jobs_for_scope(clusters, selected_scope_index, name_filter)
+        if entry[1].name == key.name and entry[1].historical == key.historical
+    ]
+
+
+def jobs_selection_count(
+    clusters: list[Cluster],
+    selected_scope_index: int,
+    name_filter: str = "",
+    group_by_name: bool = True,
+    drilldown: JobGroupKey | None = None,
+) -> int:
+    """Number of rows reachable with the jobs selection cursor."""
+    if drilldown is None:
+        return len(
+            job_groups_for_scope(
+                clusters,
+                selected_scope_index,
+                name_filter,
+                group_by_name,
+            )
+        )
+    return len(jobs_in_group(clusters, selected_scope_index, drilldown, name_filter))
+
+
+def selected_job_group(
+    clusters: list[Cluster],
+    selected_scope_index: int,
+    selected_index: int,
+    name_filter: str = "",
+) -> JobGroup | None:
+    groups = job_groups_for_scope(
+        clusters,
+        selected_scope_index,
+        name_filter,
+        True,
+    )
+    if not groups:
+        return None
+    return groups[min(max(0, selected_index), len(groups) - 1)]
+
+
 def fuzzy_job_name_match(job_name: str, query: str) -> bool:
     """Match every query word as a case-insensitive subsequence of the name."""
     candidate = job_name.casefold()
@@ -233,22 +323,23 @@ def compact_job_time(value: float | None) -> str:
     return datetime.fromtimestamp(value).astimezone().strftime("%b %d %H:%M")
 
 
-def live_job_row(cluster: Cluster, job: UserJob, selected: bool) -> Line:
+def live_job_row(
+    cluster: Cluster,
+    job: UserJob,
+    selected: bool,
+    show_name: bool = True,
+) -> Line:
     time_limit, nodes, cpus, memory, gpus = resource_values(cluster, job)
     start = compact_job_time(job.start)
     placement, placement_style = placement_label(job)
-    state = job.state.split(maxsplit=1)[0].rstrip("+")
     values = (
+        clipped_cell(job.name if show_name else "", NAME_WIDTH),
         clipped_cell(cluster.name, CLUSTER_WIDTH),
-        clipped_cell(job.job_id, JOB_WIDTH),
-        clipped_cell(job.name, NAME_WIDTH),
-        clipped_cell(state, STATE_WIDTH),
         clipped_cell(time_limit, TIME_LIMIT_WIDTH),
         clipped_cell(nodes, NODES_WIDTH),
         clipped_cell(cpus, CPUS_WIDTH),
         clipped_cell(memory, MEMORY_WIDTH),
         clipped_cell(gpus, GPUS_WIDTH),
-        clipped_cell(priority_label(job), PRIORITY_WIDTH),
         clipped_cell(start, START_WIDTH),
         clipped_cell(placement, PLACEMENT_WIDTH),
     )
@@ -257,11 +348,11 @@ def live_job_row(cluster: Cluster, job: UserJob, selected: bool) -> Line:
     return line(
         (values[0], "normal"),
         (" ", "normal"),
-        (values[1], "mine"),
+        (values[1], "normal"),
         (" ", "normal"),
         (values[2], "normal"),
         (" ", "normal"),
-        (values[3], state_style(job)),
+        (values[3], "normal"),
         (" ", "normal"),
         (values[4], "normal"),
         (" ", "normal"),
@@ -271,23 +362,21 @@ def live_job_row(cluster: Cluster, job: UserJob, selected: bool) -> Line:
         (" ", "normal"),
         (values[7], "normal"),
         (" ", "normal"),
-        (values[8], "normal"),
-        (" ", "normal"),
-        (values[9], "normal"),
-        (" ", "normal"),
-        (values[10], "normal"),
-        (" ", "normal"),
-        (values[11], placement_style),
+        (values[8], placement_style),
     )
 
 
-def history_job_row(cluster: Cluster, job: UserJob, selected: bool) -> Line:
+def history_job_row(
+    cluster: Cluster,
+    job: UserJob,
+    selected: bool,
+    show_name: bool = True,
+) -> Line:
     time_limit, nodes, cpus, memory, gpus = resource_values(cluster, job)
     state = job.state.split(maxsplit=1)[0].rstrip("+")
     values = (
+        clipped_cell(job.name if show_name else "", NAME_WIDTH),
         clipped_cell(cluster.name, CLUSTER_WIDTH),
-        clipped_cell(job.job_id, JOB_WIDTH),
-        clipped_cell(job.name, NAME_WIDTH),
         clipped_cell(state, RESULT_WIDTH),
         clipped_cell(available_value(job.elapsed), ELAPSED_WIDTH),
         clipped_cell(time_limit, TIME_LIMIT_WIDTH),
@@ -302,7 +391,6 @@ def history_job_row(cluster: Cluster, job: UserJob, selected: bool) -> Line:
         return line((" ".join(values), "selected"))
     styles = (
         "normal",
-        "mine",
         "normal",
         state_style(job),
         "normal",
@@ -322,10 +410,37 @@ def history_job_row(cluster: Cluster, job: UserJob, selected: bool) -> Line:
     return row
 
 
-def job_row(cluster: Cluster, job: UserJob, selected: bool) -> Line:
+def job_row(
+    cluster: Cluster,
+    job: UserJob,
+    selected: bool,
+    show_name: bool = True,
+) -> Line:
     if job.historical:
-        return history_job_row(cluster, job, selected)
-    return live_job_row(cluster, job, selected)
+        return history_job_row(cluster, job, selected, show_name)
+    return live_job_row(cluster, job, selected, show_name)
+
+
+def group_job_row(group: JobGroup, selected: bool) -> Line:
+    return line(
+        (
+            GROUP_MARKER + clipped_cell(group.key.name, NAME_WIDTH),
+            "selected" if selected else "title",
+        )
+    )
+
+
+def table_job_row(
+    cluster: Cluster,
+    job: UserJob,
+    selected: bool,
+    show_name: bool = True,
+) -> Line:
+    """Reserve the group-marker gutter without shifting table columns."""
+    return line(
+        (GROUP_GUTTER, "selected" if selected else "normal"),
+        *job_row(cluster, job, selected, show_name),
+    )
 
 
 def factor_rows(factors: PriorityFactors) -> list[Line]:
@@ -598,18 +713,74 @@ def selected_job_details(cluster: Cluster, job: UserJob) -> list[Line]:
     return rows
 
 
+def selected_group_details(group: JobGroup) -> list[Line]:
+    jobs = [job for _cluster, job in group.entries]
+    clusters = sorted({cluster.name for cluster, _job in group.entries})
+    rows = [
+        plain("═" * JOBS_TABLE_WIDTH),
+        line(("JOB GROUP", "title")),
+        line(("name        ", "normal"), (group.key.name, "title")),
+        plain(
+            f"scope       {len(jobs)} "
+            f"{'history' if group.key.historical else 'current'} jobs"
+        ),
+        plain(f"clusters    {', '.join(clusters)}"),
+    ]
+    if group.key.historical:
+        states = Counter(
+            job.state.split(maxsplit=1)[0].rstrip("+").upper() for job in jobs
+        )
+        result_row = line(("results     ", "normal"))
+        for index, (state, count) in enumerate(
+            sorted(states.items(), key=lambda item: (-item[1], item[0]))
+        ):
+            if index:
+                result_row.append(("   ", "normal"))
+            sample = next(
+                job
+                for job in jobs
+                if job.state.split(maxsplit=1)[0].rstrip("+").upper() == state
+            )
+            result_row.append((f"{count} {state.lower()}", state_style(sample)))
+        rows.append(result_row)
+    else:
+        running = sum(job.is_running for job in jobs)
+        pending = len(jobs) - running
+        placements = Counter(job.placement for job in jobs if not job.is_running)
+        rows.append(
+            line(
+                ("status      ", "normal"),
+                (f"{running} running", "running"),
+                ("   ", "normal"),
+                (f"{pending} pending", "reserved"),
+            )
+        )
+        rows.append(
+            line(
+                ("placement   ", "normal"),
+                (f"{placements['planned']} planned", "free"),
+                ("   ", "normal"),
+                (f"{placements['estimate']} estimate", "reserved"),
+                ("   ", "normal"),
+                (f"{placements['none']} no estimate", "busy"),
+            )
+        )
+    rows.append(line(("Enter opens a table containing only this job name.", "busy")))
+    return rows
+
+
 def jobs_table(
     clusters: list[Cluster],
     selected_scope_index: int,
     selected_job_index: int,
     name_filter: str = "",
+    group_by_name: bool = True,
+    drilldown: JobGroupKey | None = None,
 ) -> tuple[list[Line], list[Line], list[Line], int, int, int]:
     selected_scope_index = min(max(0, selected_scope_index), len(clusters))
     scoped_clusters = (
         clusters if selected_scope_index == 0 else [clusters[selected_scope_index - 1]]
     )
-    jobs = jobs_for_scope(clusters, selected_scope_index, name_filter)
-    selected_job_index = min(max(0, selected_job_index), len(jobs) - 1) if jobs else 0
     menu = jobs_scope_menu(clusters, selected_scope_index)
     resource_columns = (
         ("TIME LIMIT", TIME_LIMIT_WIDTH),
@@ -618,23 +789,19 @@ def jobs_table(
         ("MEMORY", MEMORY_WIDTH),
         ("GPUS", GPUS_WIDTH),
     )
-    live_column_header = table_header(
+    live_column_header = GROUP_GUTTER + table_header(
         (
-            ("CLUSTER", CLUSTER_WIDTH),
-            ("JOB", JOB_WIDTH),
             ("NAME", NAME_WIDTH),
-            ("STATE", STATE_WIDTH),
+            ("CLUSTER", CLUSTER_WIDTH),
             *resource_columns,
-            ("PRIORITY", PRIORITY_WIDTH),
             ("START", START_WIDTH),
             ("PLACEMENT", PLACEMENT_WIDTH),
         )
     )
-    history_column_header = table_header(
+    history_column_header = GROUP_GUTTER + table_header(
         (
-            ("CLUSTER", CLUSTER_WIDTH),
-            ("JOB", JOB_WIDTH),
             ("NAME", NAME_WIDTH),
+            ("CLUSTER", CLUSTER_WIDTH),
             ("RESULT", RESULT_WIDTH),
             ("ELAPSED", ELAPSED_WIDTH),
             *resource_columns,
@@ -648,6 +815,62 @@ def jobs_table(
             f"user {scoped_clusters[0].user or '—'} · "
             "scheduler start estimates are not guarantees"
         )
+    if drilldown is not None:
+        entries = jobs_in_group(
+            clusters,
+            selected_scope_index,
+            drilldown,
+            name_filter,
+        )
+        selection_count = len(entries)
+        selected_job_index = (
+            min(max(0, selected_job_index), selection_count - 1)
+            if selection_count
+            else 0
+        )
+        column_header = (
+            history_column_header if drilldown.historical else live_column_header
+        )
+        headers = [
+            line((f'JOBS NAMED "{drilldown.name}"', "title")),
+            menu,
+            plain(context + " · Esc returns to grouped jobs"),
+            plain(""),
+            line((column_header, "title")),
+            plain("-" * len(column_header)),
+        ]
+        body: list[Line] = []
+        selected_body_index = 0
+        for index, (cluster, job) in enumerate(entries):
+            if index == selected_job_index:
+                selected_body_index = len(body)
+            body.append(table_job_row(cluster, job, index == selected_job_index))
+        details: list[Line] = []
+        if entries:
+            selected_cluster, selected_job = entries[selected_job_index]
+            details = selected_job_details(selected_cluster, selected_job)
+        table_width = max(
+            JOBS_TABLE_WIDTH,
+            max((visible_length(row) for row in headers + body + details), default=0),
+        )
+        return (
+            headers,
+            body,
+            details,
+            table_width,
+            selected_body_index,
+            selected_job_index,
+        )
+
+    groups = job_groups_for_scope(
+        clusters,
+        selected_scope_index,
+        name_filter,
+        group_by_name,
+    )
+    selected_job_index = (
+        min(max(0, selected_job_index), len(groups) - 1) if groups else 0
+    )
     headers = [
         line(("RUNNING + PENDING", "title")),
         menu,
@@ -656,22 +879,44 @@ def jobs_table(
         line((live_column_header, "title")),
         plain("-" * len(live_column_header)),
     ]
-    live_jobs = [entry for entry in jobs if not entry[1].historical]
-    past_jobs = [entry for entry in jobs if entry[1].historical]
-    body: list[Line] = []
+    live_groups = [group for group in groups if not group.key.historical]
+    past_groups = [group for group in groups if group.key.historical]
+    body = []
     selected_body_index = 0
-    job_index = 0
-    for cluster, job in live_jobs:
-        if job_index == selected_job_index:
+    group_index = 0
+
+    def append_group(group: JobGroup) -> None:
+        nonlocal group_index, selected_body_index
+        selected = group_index == selected_job_index
+        if selected:
             selected_body_index = len(body)
-        body.append(job_row(cluster, job, job_index == selected_job_index))
-        job_index += 1
+        if group.grouped and group_by_name:
+            body.append(group_job_row(group, selected))
+            for cluster, job in group.entries[:GROUP_PREVIEW_COUNT]:
+                body.append(table_job_row(cluster, job, False, show_name=False))
+            remaining = len(group.entries) - GROUP_PREVIEW_COUNT
+            if remaining > 0:
+                body.append(
+                    line(
+                        (
+                            " " * (NAME_WIDTH + 3) + f"… {remaining} more",
+                            "busy",
+                        )
+                    )
+                )
+        else:
+            cluster, job = group.entries[0]
+            body.append(table_job_row(cluster, job, selected))
+        group_index += 1
+
+    for group in live_groups:
+        append_group(group)
     live_sources = [
         cluster
         for cluster in scoped_clusters
         if not cluster.error and not cluster.jobs_error
     ]
-    if not live_jobs:
+    if not live_groups:
         if any(cluster.loading for cluster in scoped_clusters):
             body.append(line(("Loading live jobs…", "cpu")))
         elif name_filter and live_sources:
@@ -687,17 +932,14 @@ def jobs_table(
             plain("-" * len(history_column_header)),
         )
     )
-    for cluster, job in past_jobs:
-        if job_index == selected_job_index:
-            selected_body_index = len(body)
-        body.append(job_row(cluster, job, job_index == selected_job_index))
-        job_index += 1
+    for group in past_groups:
+        append_group(group)
     history_sources = [
         cluster
         for cluster in scoped_clusters
         if not cluster.error and not cluster.history_error
     ]
-    if not past_jobs:
+    if not past_groups:
         if any(cluster.loading for cluster in scoped_clusters):
             body.append(line(("Loading job history…", "cpu")))
         elif name_filter and history_sources:
@@ -705,9 +947,13 @@ def jobs_table(
         elif history_sources:
             body.append(plain("No recent job history for the selected user(s)."))
     details: list[Line] = []
-    if jobs:
-        selected_cluster, selected_job = jobs[selected_job_index]
-        details = selected_job_details(selected_cluster, selected_job)
+    if groups:
+        selected_group = groups[selected_job_index]
+        if selected_group.grouped and group_by_name:
+            details = selected_group_details(selected_group)
+        else:
+            selected_cluster, selected_job = selected_group.entries[0]
+            details = selected_job_details(selected_cluster, selected_job)
     table_width = max(
         JOBS_TABLE_WIDTH,
         max((visible_length(row) for row in headers + body + details), default=0),
@@ -753,6 +999,8 @@ def jobs_legend_lines(
     history_age_seconds: int | None,
     history_refreshing: bool,
     history_refresh_seconds: int,
+    group_by_name: bool = True,
+    drilldown: bool = False,
 ) -> list[Line]:
     age = "waiting for data" if age_seconds is None else f"{age_seconds}s ago"
     history_age = (
@@ -779,7 +1027,21 @@ def jobs_legend_lines(
         plain("start times can move"),
         plain(""),
         line(("KEYS", "title")),
-        plain("↑/↓  select job"),
+        plain("↑/↓  select job / group"),
+        *(
+            [
+                (
+                    plain("Esc  grouped list")
+                    if drilldown
+                    else plain("Enter  inspect group")
+                ),
+                plain("all matching jobs shown")
+                if drilldown
+                else plain("group preview: first 5"),
+            ]
+            if group_by_name
+            else []
+        ),
         plain("Ctrl+F  toggle filter"),
         plain("type filters live"),
         plain("Enter/Esc  finish filter"),
