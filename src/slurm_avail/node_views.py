@@ -220,26 +220,25 @@ def cluster_header(cluster: Cluster) -> list[Line]:
         if cluster.loading
         else ""
     )
-    title = f"=== {cluster.name} ==="
+    title: Line = [(cluster.name, "title")]
     if loading_frame:
-        title += f" {loading_frame}"
+        title.append((f"  {loading_frame}", "cpu"))
     header = [
-        line((title, "title")),
-        plain("-" * CLUSTER_WIDTH),
+        title,
+        line(("─" * CLUSTER_WIDTH, "busy")),
     ]
 
     if cluster.loading and not cluster.nodes and not cluster.error:
         endpoint = cluster.host or "configured endpoint"
         header.extend(
             [
-                plain(""),
+                line(("STATUS", "title")),
                 line((f"{loading_frame} CONNECTING", "cpu")),
                 plain(endpoint[:CLUSTER_WIDTH]),
                 plain(""),
                 plain(""),
-                plain(""),
-                plain("NODES"),
-                plain("-" * CLUSTER_WIDTH),
+                line(("NODES", "title"), ("  0", "busy")),
+                line(("─" * CLUSTER_WIDTH, "busy")),
             ]
         )
         return header
@@ -247,14 +246,13 @@ def cluster_header(cluster: Cluster) -> list[Line]:
     if cluster.error:
         header.extend(
             [
-                plain(""),
+                line(("STATUS", "title")),
                 line((cluster.failure_label, cluster.failure_style)),
                 plain(""),
                 plain(""),
                 plain(""),
-                plain(""),
-                plain("NODES"),
-                plain("-" * CLUSTER_WIDTH),
+                line(("NODES", "title"), ("  0", "busy")),
+                line(("─" * CLUSTER_WIDTH, "busy")),
             ]
         )
         return header
@@ -265,7 +263,7 @@ def cluster_header(cluster: Cluster) -> list[Line]:
     free_mem = sum(node.mem_free for node in cluster.nodes)
     total_gpu = sum(node.gpu_total for node in cluster.nodes)
     free_gpu = sum(node.gpu_free for node in cluster.nodes)
-    header.append(plain("FREE / TOTAL"))
+    header.append(line(("CAPACITY", "title"), ("  free / total", "busy")))
     if cluster.has_gpus:
         header.extend(
             [
@@ -274,7 +272,7 @@ def cluster_header(cluster: Cluster) -> list[Line]:
                     free_gpu,
                     total_gpu,
                     f"{free_gpu}/{total_gpu}",
-                    5,
+                    8,
                     "free",
                 ),
                 capacity_bar(
@@ -282,7 +280,7 @@ def cluster_header(cluster: Cluster) -> list[Line]:
                     free_cpu,
                     total_cpu,
                     f"{compact_count(free_cpu)}/{compact_count(total_cpu)}",
-                    5,
+                    8,
                     "cpu",
                 ),
                 capacity_bar(
@@ -290,7 +288,7 @@ def cluster_header(cluster: Cluster) -> list[Line]:
                     free_mem,
                     total_mem,
                     f"{compact_memory(free_mem)}/{compact_memory(total_mem)}",
-                    5,
+                    8,
                     "memory",
                 ),
             ]
@@ -316,7 +314,7 @@ def cluster_header(cluster: Cluster) -> list[Line]:
                     free_cpu,
                     total_cpu,
                     f"{compact_count(free_cpu)}/{compact_count(total_cpu)}",
-                    5,
+                    8,
                     "cpu",
                     highlighted_busy=user_cpu,
                 ),
@@ -325,7 +323,7 @@ def cluster_header(cluster: Cluster) -> list[Line]:
                     free_mem,
                     total_mem,
                     f"{compact_memory(free_mem)}/{compact_memory(total_mem)}",
-                    5,
+                    8,
                     "memory",
                     highlighted_busy=user_mem,
                 ),
@@ -334,10 +332,9 @@ def cluster_header(cluster: Cluster) -> list[Line]:
         )
     header.extend(
         [
-            plain(f"{len(cluster.nodes)} nodes"),
             plain(""),
-            plain("NODES"),
-            plain("-" * CLUSTER_WIDTH),
+            line(("NODES", "title"), (f"  {len(cluster.nodes):,}", "busy")),
+            line(("─" * CLUSTER_WIDTH, "busy")),
         ]
     )
     return header
@@ -375,7 +372,7 @@ def node_label(
         marker += "U"
         if node.status not in ("drained", "reserved") and not usage.reserved:
             style = "mine"
-    return f"{node.name}{marker}", style
+    return f"{node.name} {marker}".rstrip(), style
 
 
 def wrapped_node_label(label: str, style: str) -> list[Line]:
@@ -431,8 +428,8 @@ def cpu_node_lines(node: Node, usage: UserNodeUsage | None = None) -> list[Line]
         label_lines = wrapped_node_label(label, label_style)
         resource_prefix = [(" " * NODE_LABEL_WIDTH, "normal")]
     return label_lines + [
-        line(*resource_prefix, *cpu_bar),
-        line((" " * NODE_LABEL_WIDTH, "normal"), *mem_bar),
+        line(*resource_prefix, (" ", "normal"), *cpu_bar),
+        line((" " * (NODE_LABEL_WIDTH + 1), "normal"), *mem_bar),
     ]
 
 
@@ -472,9 +469,9 @@ def gpu_node_lines(
             "mine_reserved" if usage.reserved else "mine",
             show_busy_when_present=True,
         )
-        resource_line = line(*resource_prefix, *gpu_bar)
+        resource_line = line(*resource_prefix, (" ", "normal"), *gpu_bar)
         secondary_line = line(
-            (" " * NODE_LABEL_WIDTH, "normal"),
+            (" " * (NODE_LABEL_WIDTH + 1), "normal"),
             ("C ", "cpu"),
             (free_meter(node.cpu_free, node.cpu_total), "cpu"),
             (" M ", "memory"),
@@ -482,7 +479,7 @@ def gpu_node_lines(
         )
         return label_lines + [resource_line, secondary_line]
 
-    spans = [*resource_prefix, ("G ", "free"), ("[", label_style)]
+    spans = [*resource_prefix, (" ", "normal"), ("G ", "free"), ("[", label_style)]
     spans.append((free_symbol * node.gpu_free, "free"))
     spans.append(("■" * other_allocated_gpus, "busy"))
     spans.append(("■" * user_gpus, "mine"))
@@ -524,7 +521,7 @@ def legend_lines(
 
     result = [
         line(("LEGEND", "title")),
-        plain("-" * LEGEND_WIDTH),
+        line(("─" * LEGEND_WIDTH, "busy")),
         line(("C █", "cpu"), ("  CPU free", "normal")),
         line(("M █", "memory"), ("  memory free", "normal")),
         line((free_symbol, "free"), ("  GPU free", "normal")),
@@ -534,11 +531,10 @@ def legend_lines(
         line(("X ■", "exclusive"), (" another user's node", "normal")),
         line(("F ■", "busy"), (" resource fully used", "normal")),
         *ownership_legend_lines(),
-        plain("GPU squares or bars"),
-        plain("large counts: free/total"),
-        plain("C/M glyphs show free"),
-        plain("bars/numbers: free/total"),
-        plain("long names wrap above bars"),
+        plain("bars + numbers: free/total"),
+        plain("GPU squares: one per GPU"),
+        plain("C/M glyphs: free capacity"),
+        plain("long names wrap"),
         plain(""),
         line(("KEYS", "title")),
         plain("Tab views   r refresh"),

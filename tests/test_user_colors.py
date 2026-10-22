@@ -112,15 +112,51 @@ def test_gpu_and_cpu_cluster_node_sections_start_at_same_height() -> None:
     gpu_nodes_row = next(
         index
         for index, row in enumerate(gpu_header)
-        if "".join(text for text, _style in row) == "NODES"
+        if "".join(text for text, _style in row).startswith("NODES")
     )
     cpu_nodes_row = next(
         index
         for index, row in enumerate(cpu_header)
-        if "".join(text for text, _style in row) == "NODES"
+        if "".join(text for text, _style in row).startswith("NODES")
     )
 
     assert gpu_nodes_row == cpu_nodes_row
+
+
+def test_node_headers_use_compact_titles_and_aligned_status_sections() -> None:
+    normal = Cluster(
+        name="CPU",
+        host="login",
+        focus="cpu",
+        nodes=[cpu_node("cpu01")],
+    )
+    failed = Cluster(
+        name="DOWN",
+        host="login",
+        failure_kind="unreachable",
+        error="connection failed",
+    )
+
+    normal_header = cluster_header(normal)
+    failed_header = cluster_header(failed)
+    normal_text = ["".join(text for text, _style in row) for row in normal_header]
+    failed_text = ["".join(text for text, _style in row) for row in failed_header]
+
+    assert normal_text[0] == "CPU"
+    assert "===" not in normal_text[0]
+    assert "CAPACITY  free / total" in normal_text
+    assert "NODES  1" in normal_text
+    assert failed_text[2] == "STATUS"
+    assert "NODES  0" in failed_text
+    assert len(normal_header) == len(failed_header)
+
+
+def test_node_status_marker_is_separate_from_hostname() -> None:
+    node = gpu_node("gpu01", reserved=True)
+
+    text = "".join(value for value, _style in gpu_node_lines(node, colored=True)[0])
+
+    assert text.startswith("gpu01 R")
 
 
 def test_large_gpu_count_uses_scaled_bar_with_cpu_and_memory_below() -> None:
