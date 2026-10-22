@@ -16,6 +16,8 @@
 multiple Slurm clusters into one keyboard-driven TUI. Clusters can be queried
 locally or over SSH. No `slurm-avail` agent or service needs to be installed on
 the HPC systems; the dashboard uses their existing Slurm command-line tools.
+The bottom-right counter shows local and SSH cluster command attempts made in
+the trailing minute, including failed attempts and retries.
 
 | Live multi-cluster overview | Scheduler forecast |
 | --- | --- |
@@ -71,14 +73,22 @@ not measure processor activity or apply billing weights. Jobs spanning multiple
 columns contribute time to each column they overlap. Running jobs count only
 up to the displayed end time.
 
-Accounting is fetched separately from live cluster data, cached in memory, and
-refreshed every five minutes while following the present. Press `r` to refresh
-manually. Existing graphs remain visible during refresh, with an indication that
-they show previous data. A failed refresh retains that snapshot and marks it as
+Accounting is fetched separately from live cluster data. The first request for
+a cluster loads all history retained by Slurm into memory. Zooming and panning
+then reuse that cache without another request. While following the present, a
+five-minute refresh fetches a recent overlap and merges it into the cache. Press
+`r` to refresh manually. Each chart reports the hours in the shown window, and
+the header reports CPU- and GPU-hours across all retained history plus the date
+of the first retained allocation. These are not guaranteed lifetime totals
+because sites can purge accounting records.
+
+Existing graphs remain visible during refresh, with an indication that they
+show previous data. A failed refresh retains that snapshot and marks it as
 stale. In the scope selector, `x` replaces the number of an unavailable cluster,
-`!` marks incomplete records, and `~` means loading or refreshing. Select a cluster
-to see its error details above the graphs. Its number shortcut still works.
-All totals are labelled partial when any selected cluster has missing data.
+`!` marks incomplete records, and `~` means loading or refreshing. Select a
+cluster to see its error details above the graphs. Its number shortcut still
+works. All totals are labelled partial when any selected cluster has missing
+data.
 
 Usage uses standard `sacct` allocation fields and requires readable accounting
 history, including `AllocTRES` for GPU counts. SSH queries initialize a login
@@ -359,6 +369,7 @@ slurm-avail --config /path/to/config.toml
 | `Space` | Include or exclude a cluster in the Estimate view |
 | `+` / `-` | Change Forecast resolution or Usage time range |
 | `[` / `]` | Change Jobs/Usage scope or Forecast cluster |
+| `Ctrl+F` | Show the live fuzzy job-name filter at the bottom; press again to clear and hide it. Backspace edits, Ctrl+U clears, and Enter/Esc finishes editing |
 | Left / Right, `End` in Usage | Move through history, return to now |
 | `q` | Quit |
 

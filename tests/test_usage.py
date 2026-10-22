@@ -8,14 +8,19 @@ import pytest
 
 from slurm_avail.config import AppConfig, ClusterConfig, DashboardSettings
 from slurm_avail.usage import (
+    USAGE_HISTORY_START,
+    USAGE_REFRESH_OVERLAP_SECONDS,
     USAGE_WINDOWS,
     UsageHistory,
     UsageJob,
     UsageResult,
     fetch_usage,
+    incremental_usage_start,
+    merge_usage_results,
     parse_usage,
     usage_buckets,
     usage_command,
+    usage_totals,
 )
 from slurm_avail.usage_views import usage_scope_menu, usage_table, usage_tick
 
@@ -72,6 +77,8 @@ def test_running_and_failed_jobs_count_but_pending_and_steps_do_not():
     assert [j.job_id for j in result.jobs] == ["12", "13", "14"]
     assert all(j.end == now and j.gpus == 2 for j in result.jobs)
     assert result.incomplete == 0
+    assert result.jobs[1].running
+    assert not result.jobs[0].running
 
 
 def test_duplicates_arrays_and_requeued_allocations():
@@ -174,6 +181,15 @@ def test_query_uses_utc_explicit_bounds_and_allocation_records():
     assert "export PATH='/slurm bin':$PATH" in command
 
 
+def test_full_history_query_does_not_use_slurms_zero_timestamp_sentinel():
+    command = usage_command(
+        ClusterConfig(name="A"),
+        USAGE_HISTORY_START,
+        epoch("2026-03-30"),
+    )
+    assert "-S 1970-01-01T00:00:01" in command
+
+
 def test_fetch_fails_over_without_fetching_live_nodes(monkeypatch):
     calls = []
 
@@ -234,9 +250,17 @@ def test_requests_are_nonblocking_cached_and_scoped():
     history.scope = 0
     history.update(executor, config(), None, 0, {})
     assert len(executor.requests) == 2
+    history.zoom(-1)
+    history.move(-1)
+    history.update(executor, config(), None, 0, {})
+    assert len(executor.requests) == 2
     history.refresh()
     history.update(executor, config(), None, 0, {})
     assert len(executor.requests) == 4
+    assert all(
+        request[2][3] == USAGE_HISTORY_START for request in executor.requests[:2]
+    )
+    assert all(request[2][3] > USAGE_HISTORY_START for request in executor.requests[2:])
 
 
 @pytest.mark.parametrize("refresh_type", ["manual", "automatic", "historical"])
@@ -261,17 +285,18 @@ def test_refresh_keeps_previous_graphs_until_replacement_arrives(
     assert results["A"].refreshing and results["A"].stale
     headers, body = usage_table(history, ["A", "B"], results, 80)
     assert "previous data shown" in "".join(t for row in headers for t, _ in row)
-    assert "CPU-hours   total 8 h" in "".join(t for row in body for t, _ in row)
+    assert "CPU-hours   shown 8 h" in "".join(t for row in body for t, _ in row)
     assert len(executor.requests) == 2
     fresh = UsageResult(jobs=[UsageJob("2", "", now[0] - 3600, now[0], 16, 4)])
     executor.requests[1][0].set_result(fresh)
     results = history.update(executor, config(), None, 0, {})
     assert results["A"].jobs == fresh.jobs
     assert not results["A"].refreshing and not results["A"].stale
-    # A different requested period must never display unrelated cached data.
+    # A different displayed period reuses the retained-history cache.
     history.move(-1)
     results = history.update(executor, config(), None, 0, {})
-    assert results["A"] is None
+    assert results["A"] is not None
+    assert len(executor.requests) == 2
 
 
 def test_failed_refresh_preserves_last_successful_snapshot():
@@ -294,7 +319,7 @@ def test_failed_refresh_preserves_last_successful_snapshot():
     body_text = "".join(t for row in body for t, _ in row)
     assert "[x A]" in header_text
     assert "timed out" in header_text and "timed out" not in body_text
-    assert "CPU-hours   total 8 h" in body_text
+    assert "CPU-hours   shown 8 h" in body_text
 
 
 def test_return_to_present_does_not_reuse_a_separate_historical_period(monkeypatch):
@@ -307,7 +332,8 @@ def test_return_to_present_does_not_reuse_a_separate_historical_period(monkeypat
     history.update(executor, config(), None, 0, {})
     history.follow_now = True
     history.refresh()
-    assert history.update(executor, config(), None, 0, {})["A"] is None
+    result = history.update(executor, config(), None, 0, {})["A"]
+    assert result is not None and result.refreshing
 
 
 def test_compact_axis_labels_and_month_default():
@@ -374,8 +400,10 @@ def test_charts_combine_clusters_without_deduplicating_shared_job_ids():
     results = {"A": UsageResult(jobs=[job]), "B": UsageResult(jobs=[job])}
     headers, body = usage_table(history, ["A", "B"], results, 80)
     text = "\n".join("".join(part for part, _ in row) for row in headers + body)
-    assert "CPU-hours   total 48 h" in text
-    assert "GPU-hours   total 12 h" in text
+    assert "CPU-hours   shown 48 h" in text
+    assert "GPU-hours   shown 12 h" in text
+    assert "ALL RETAINED  CPU 48 h · GPU 12 h" in text
+    assert "FIRST RETAINED ALLOCATION  1970-01-01" in text
     assert "Partial" not in text
     assert max(sum(len(part) for part, _ in row) for row in body) <= 80
 
@@ -400,7 +428,64 @@ def test_unavailable_is_not_rendered_as_zero_usage():
     text = "".join(part for row in headers for part, _ in row)
     assert "[x A]" in text
     assert "Usage unavailable" in text
-    assert "total 0" not in text
+    assert "shown 0" not in text
+
+
+def test_visible_and_retained_totals_are_distinct():
+    history = UsageHistory()
+    history.end = 7200
+    history.window_index = 0
+    jobs = [
+        UsageJob("old", "", -20000, -16400, 8, 2),
+        UsageJob("shown", "", 3600, 7200, 4, 1),
+    ]
+
+    headers, body = usage_table(
+        history,
+        ["A"],
+        {"A": UsageResult(jobs=jobs)},
+        80,
+    )
+    header_text = "".join(part for row in headers for part, _ in row)
+    body_text = "".join(part for row in body for part, _ in row)
+    first_date = datetime.fromtimestamp(min(job.start for job in jobs)).astimezone()
+
+    assert "ALL RETAINED  CPU 12 h · GPU 3 h" in header_text
+    assert f"FIRST RETAINED ALLOCATION  {first_date:%Y-%m-%d}" in header_text
+    assert "CPU-hours   shown 4 h" in body_text
+    assert "GPU-hours   shown 1 h" in body_text
+
+
+def test_incremental_refresh_replaces_recent_jobs_and_keeps_old_history():
+    previous = UsageResult(
+        jobs=[
+            UsageJob("old", "", 100, 200, 1, 0),
+            UsageJob("recent", "", 900, 950, 2, 1),
+        ],
+        checked_at=1000,
+    )
+    current = UsageResult(
+        jobs=[UsageJob("recent", "", 900, 1000, 2, 1)],
+        checked_at=1000,
+    )
+
+    merged = merge_usage_results(previous, current, 800)
+
+    assert [job.job_id for job in merged.jobs] == ["old", "recent"]
+    assert merged.jobs[-1].end == 1000
+    assert usage_totals(merged.jobs) == pytest.approx((2 / 72 + 1 / 18, 1 / 36))
+
+
+def test_incremental_refresh_includes_full_span_of_running_jobs():
+    result = UsageResult(
+        jobs=[UsageJob("running", "", 100, 1000, 1, 1, running=True)],
+        checked_at=200000,
+    )
+
+    assert incremental_usage_start(result) == 100
+    assert incremental_usage_start(UsageResult(checked_at=200000)) == (
+        200000 - USAGE_REFRESH_OVERLAP_SECONDS
+    )
 
 
 def test_cli_usage_once_uses_accounting_only(monkeypatch, tmp_path, capsys):
@@ -424,8 +509,9 @@ def test_cli_usage_once_uses_accounting_only(monkeypatch, tmp_path, capsys):
     )
     seen = []
 
-    def fetch(cluster, *_args):
+    def fetch(cluster, _settings, _user, start, _end):
         seen.append(cluster.name)
+        assert start == USAGE_HISTORY_START
         return UsageResult()
 
     monkeypatch.setattr("slurm_avail.cli.fetch_usage", fetch)
@@ -508,5 +594,5 @@ def test_dashboard_usage_keys_and_rendering(monkeypatch, tmp_path, size):
         (3, 2, True),
     ]
     assert all("CPU-hours" in frame and "GPU-hours" in frame for frame in frames)
-    assert "total 16 h" in frames[0]
-    assert "total 8 h" in frames[-1]
+    assert "shown 16 h" in frames[0]
+    assert "shown 8 h" in frames[-1]

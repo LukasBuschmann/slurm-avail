@@ -54,3 +54,27 @@ def test_shutdown_prevents_late_commands_from_starting() -> None:
             )
     finally:
         reset_command_cancellation()
+
+
+def test_background_command_cannot_consume_ui_input() -> None:
+    script = """
+import sys
+from slurm_avail.processes import run_captured
+result = run_captured(
+    [sys.executable, "-c", "import sys; print(repr(sys.stdin.read()))"],
+    check=True,
+    timeout=2,
+)
+print(result.stdout, end="")
+print(sys.stdin.read(), end="")
+"""
+    result = subprocess.run(
+        [sys.executable, "-c", script],
+        input="ui-keystrokes\n",
+        capture_output=True,
+        text=True,
+        check=True,
+        timeout=5,
+    )
+
+    assert result.stdout == "''\nui-keystrokes\n"

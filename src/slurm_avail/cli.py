@@ -28,7 +28,7 @@ from .output import (
     render_usage_once,
 )
 from .tui import dashboard
-from .usage import UsageHistory, fetch_usage
+from .usage import USAGE_HISTORY_START, UsageHistory, fetch_usage
 
 
 def package_version() -> str:
@@ -189,7 +189,7 @@ def main() -> int:
                         cluster,
                         config.settings,
                         arguments.user,
-                        history.start,
+                        USAGE_HISTORY_START,
                         history.end,
                     )
                     for cluster in selected

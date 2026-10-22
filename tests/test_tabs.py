@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import concurrent.futures
 import curses
 
 import pytest
@@ -19,6 +20,7 @@ from slurm_avail.config import (
 )
 from slurm_avail.config_views import config_table
 from slurm_avail.constants import VIEWS
+from slurm_avail.models import Cluster, UserJob
 from slurm_avail.text import tab_line
 from slurm_avail.tui import dashboard
 from slurm_avail.usage import UsageHistory, UsageResult
@@ -213,6 +215,191 @@ def test_config_only_navigation_does_not_start_live_polling(tui, tmp_path):
     active, requests = tui
     assert active == ["config"] * 4
     assert requests == []
+
+
+def test_dashboard_shows_request_count_in_bottom_right(tui, monkeypatch, tmp_path):
+    monkeypatch.setattr("slurm_avail.tui.requests_last_minute", lambda _now: 17)
+    screen = Screen([ord("q")])
+
+    dashboard(screen, "nodes", local_config(), tmp_path / "config.toml", None, 0, 0)
+
+    lines = screen.frames[-1].splitlines()
+    assert "REQUESTS / MIN" in lines[-2]
+    assert lines[-1].rstrip().endswith("17")
+
+
+def test_jobs_ctrl_f_filters_live_without_blocking_navigation(
+    tui, monkeypatch, tmp_path
+):
+    def job(job_id, name):
+        return UserJob(
+            job_id=job_id,
+            partition="cpu",
+            name=name,
+            state="PENDING",
+            reason="Resources",
+            priority="1",
+            start=None,
+            end=None,
+            scheduled_nodes=(),
+            time_limit="01:00:00",
+            node_count=1,
+            cpu_count=1,
+            memory="1G",
+            tres_per_node="",
+            allocated_tres="",
+            account="project",
+            qos="normal",
+        )
+
+    cluster = Cluster(
+        name="LOCAL",
+        host="local",
+        user="researcher",
+        jobs=[
+            job("1", "protein-training"),
+            job("2", "unrelated-analysis"),
+        ],
+    )
+    monkeypatch.setattr(
+        "slurm_avail.tui.placeholder_clusters",
+        lambda *_args: [cluster],
+    )
+    screen = Screen(
+        [
+            ord("f") & 0x1F,
+            ord("a"),
+            curses.KEY_DOWN,
+            curses.KEY_PPAGE,
+            curses.KEY_NPAGE,
+            curses.KEY_LEFT,
+            curses.KEY_RIGHT,
+            127,
+            *map(ord, "ptn trn"),
+            10,
+            ord("q"),
+        ]
+    )
+
+    dashboard(screen, "jobs", local_config(), tmp_path / "config.toml", None, 0, 0)
+
+    filtered_frame = screen.frames[-1]
+    assert 'filter "_" · 2 matches' in screen.frames[1]
+    assert 'filter "a_" · 2 matches' in screen.frames[2]
+    assert "SELECTED JOB 2" in screen.frames[3]
+    assert 'filter "a_" · 2 matches' in screen.frames[7]
+    assert 'filter "ptn trn" · 1 matches' in filtered_frame
+    assert "protein-training" in filtered_frame
+    assert "unrelated-analysis" not in filtered_frame
+    assert 'filter "ptn trn" · 1 matches' in filtered_frame.splitlines()[-1]
+    assert 'filter "' not in "\n".join(filtered_frame.splitlines()[:-1])
+
+
+@pytest.mark.parametrize("finish_keys", [[], [10], [9, curses.KEY_BTAB]])
+def test_jobs_ctrl_f_clears_and_hides_filter(tui, monkeypatch, tmp_path, finish_keys):
+    cluster = Cluster(
+        name="LOCAL",
+        host="local",
+        jobs=[
+            UserJob(
+                job_id="1",
+                partition="cpu",
+                name="queue-worker",
+                state="PENDING",
+                reason="Resources",
+                priority="1",
+                start=None,
+                end=None,
+                scheduled_nodes=(),
+                time_limit="01:00:00",
+                node_count=1,
+                cpu_count=1,
+                memory="1G",
+                tres_per_node="",
+                allocated_tres="",
+                account="project",
+                qos="normal",
+            )
+        ],
+    )
+    monkeypatch.setattr(
+        "slurm_avail.tui.placeholder_clusters", lambda *_args: [cluster]
+    )
+    screen = Screen([6, *map(ord, "missing"), *finish_keys, 6, ord("q")])
+
+    dashboard(screen, "jobs", local_config(), tmp_path / "config.toml", None, 0, 0)
+
+    assert 'filter "missing' in screen.frames[8]
+    assert "queue-worker" not in screen.frames[8]
+    assert 'filter "' not in screen.frames[-1]
+    assert "No current jobs match" not in screen.frames[-1]
+    assert "queue-worker" in screen.frames[-1]
+
+
+def test_jobs_empty_filter_toggles_off(tui, tmp_path):
+    screen = Screen([6, 6, ord("q")])
+    dashboard(screen, "jobs", local_config(), tmp_path / "config.toml", None, 0, 0)
+    assert 'filter "_"' in screen.frames[1].splitlines()[-1]
+    assert 'filter "' not in screen.frames[-1]
+
+
+def test_jobs_filter_input_remains_responsive_during_pending_refresh(
+    tui, monkeypatch, tmp_path
+):
+    pending = concurrent.futures.Future()
+    pending.set_running_or_notify_cancel()
+    monkeypatch.setattr(
+        "slurm_avail.tui.submit_cluster_refreshes",
+        lambda *_args: {pending: "LOCAL"},
+    )
+    screen = Screen([6, *map(ord, "abc"), curses.KEY_DOWN, 6, 9, ord("q")])
+
+    dashboard(screen, "jobs", local_config(), tmp_path / "config.toml", None, 0, 0)
+
+    assert not pending.done()
+    assert 'filter "abc_"' in screen.frames[4].splitlines()[-1]
+    assert 'filter "' not in screen.frames[6]
+    active, _requests = tui
+    assert active[-1] != "jobs"
+
+
+def test_jobs_live_filter_accepts_q_as_search_text(tui, monkeypatch, tmp_path):
+    cluster = Cluster(
+        name="LOCAL",
+        host="local",
+        user="researcher",
+        jobs=[
+            UserJob(
+                job_id="1",
+                partition="cpu",
+                name="queue-worker",
+                state="PENDING",
+                reason="Resources",
+                priority="1",
+                start=None,
+                end=None,
+                scheduled_nodes=(),
+                time_limit="01:00:00",
+                node_count=1,
+                cpu_count=1,
+                memory="1G",
+                tres_per_node="",
+                allocated_tres="",
+                account="project",
+                qos="normal",
+            )
+        ],
+    )
+    monkeypatch.setattr(
+        "slurm_avail.tui.placeholder_clusters",
+        lambda *_args: [cluster],
+    )
+    screen = Screen([ord("f") & 0x1F, ord("q"), 10, ord("q")])
+
+    dashboard(screen, "jobs", local_config(), tmp_path / "config.toml", None, 0, 0)
+
+    assert 'filter "q_" · 1 matches' in screen.frames[2]
+    assert 'filter "q" · 1 matches' in screen.frames[-1]
 
 
 def test_disabled_views_skip_unneeded_refreshes(tui, tmp_path):

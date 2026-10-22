@@ -165,6 +165,7 @@ def jobs_scope_menu(clusters: list[Cluster], selected_scope_index: int) -> Line:
 def jobs_for_scope(
     clusters: list[Cluster],
     selected_scope_index: int,
+    name_filter: str = "",
 ) -> list[tuple[Cluster, UserJob]]:
     selected_scope_index = min(max(0, selected_scope_index), len(clusters))
     scoped_clusters = (
@@ -175,7 +176,7 @@ def jobs_for_scope(
         for cluster in scoped_clusters
         for job in (*cluster.jobs, *cluster.past_jobs)
     ]
-    return sorted(
+    ordered = sorted(
         entries,
         key=lambda entry: (
             2 if entry[1].historical else (0 if entry[1].is_running else 1),
@@ -186,6 +187,44 @@ def jobs_for_scope(
             entry[1].job_id,
         ),
     )
+    return [
+        entry for entry in ordered if fuzzy_job_name_match(entry[1].name, name_filter)
+    ]
+
+
+def fuzzy_job_name_match(job_name: str, query: str) -> bool:
+    """Match every query word as a case-insensitive subsequence of the name."""
+    candidate = job_name.casefold()
+    for token in query.casefold().split():
+        position = 0
+        for character in token:
+            position = candidate.find(character, position)
+            if position < 0:
+                return False
+            position += 1
+    return True
+
+
+def jobs_filter_line(
+    clusters: list[Cluster],
+    selected_scope_index: int,
+    name_filter: str,
+    editing: bool = False,
+) -> Line:
+    if not editing and not name_filter:
+        return []
+    selected_scope_index = min(max(0, selected_scope_index), len(clusters))
+    scoped = (
+        clusters if selected_scope_index == 0 else [clusters[selected_scope_index - 1]]
+    )
+    matches = sum(
+        fuzzy_job_name_match(job.name, name_filter)
+        for cluster in scoped
+        for jobs in (cluster.jobs, cluster.past_jobs)
+        for job in jobs
+    )
+    query = name_filter[-39:] + "_" if editing else name_filter[-40:]
+    return line((f'filter "{query}" · {matches} matches', "title"))
 
 
 def compact_job_time(value: float | None) -> str:
@@ -563,12 +602,13 @@ def jobs_table(
     clusters: list[Cluster],
     selected_scope_index: int,
     selected_job_index: int,
+    name_filter: str = "",
 ) -> tuple[list[Line], list[Line], list[Line], int, int, int]:
     selected_scope_index = min(max(0, selected_scope_index), len(clusters))
     scoped_clusters = (
         clusters if selected_scope_index == 0 else [clusters[selected_scope_index - 1]]
     )
-    jobs = jobs_for_scope(clusters, selected_scope_index)
+    jobs = jobs_for_scope(clusters, selected_scope_index, name_filter)
     selected_job_index = min(max(0, selected_job_index), len(jobs) - 1) if jobs else 0
     menu = jobs_scope_menu(clusters, selected_scope_index)
     resource_columns = (
@@ -634,6 +674,8 @@ def jobs_table(
     if not live_jobs:
         if any(cluster.loading for cluster in scoped_clusters):
             body.append(line(("Loading live jobs…", "cpu")))
+        elif name_filter and live_sources:
+            body.append(plain("No current jobs match the name filter."))
         elif live_sources:
             body.append(plain("No running or pending jobs for the selected user(s)."))
 
@@ -658,6 +700,8 @@ def jobs_table(
     if not past_jobs:
         if any(cluster.loading for cluster in scoped_clusters):
             body.append(line(("Loading job history…", "cpu")))
+        elif name_filter and history_sources:
+            body.append(plain("No history jobs match the name filter."))
         elif history_sources:
             body.append(plain("No recent job history for the selected user(s)."))
     details: list[Line] = []
@@ -736,6 +780,9 @@ def jobs_legend_lines(
         plain(""),
         line(("KEYS", "title")),
         plain("↑/↓  select job"),
+        plain("Ctrl+F  toggle filter"),
+        plain("type filters live"),
+        plain("Enter/Esc  finish filter"),
         plain("[ / ]  change scope"),
         plain("0-9  All / cluster"),
         plain("Pg  page through jobs"),

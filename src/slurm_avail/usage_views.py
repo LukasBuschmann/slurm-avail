@@ -7,7 +7,13 @@ from datetime import datetime
 
 from .constants import GPU_LEVELS, Line
 from .text import line, plain, visible_length
-from .usage import USAGE_WINDOWS, UsageHistory, UsageResult, usage_interval_buckets
+from .usage import (
+    USAGE_WINDOWS,
+    UsageHistory,
+    UsageResult,
+    usage_interval_buckets,
+    usage_totals,
+)
 from .usage_plot import (
     calendar_usage_buckets,
     nice_usage_scale,
@@ -36,7 +42,7 @@ def usage_chart(
 ) -> list[Line]:
     ceiling, step = nice_usage_scale(max(values, default=0), height)
     total = sum(values) if total is None else total
-    rows = [line((f"{label}   total {total:,.0f} h", style))]
+    rows = [line((f"{label}   shown {total:,.0f} h", style))]
     ticks = {
         max(0, round(value / ceiling * height) - 1): usage_tick(value, step)
         for value in range(step, ceiling + 1, step)
@@ -121,6 +127,7 @@ def usage_table(
         r for r in results.values() if r is not None and (not r.error or r.stale)
     ]
     jobs = [job for result in available for job in result.jobs]
+    retained_cpu, retained_gpu = usage_totals(jobs)
     partial = any(r is None or r.error or r.incomplete for r in results.values())
     refreshing = any(r is None or r.refreshing for r in results.values())
     stale = any(r.stale for r in available)
@@ -140,6 +147,19 @@ def usage_table(
         ),
         plain(f"CPU-/GPU-hours per {period} · partial periods at edges"),
     ]
+    if available:
+        headers.append(
+            plain(
+                f"ALL RETAINED  CPU {retained_cpu:,.0f} h · GPU {retained_gpu:,.0f} h"
+            )
+        )
+        if jobs:
+            first_allocation = datetime.fromtimestamp(
+                min(job.start for job in jobs)
+            ).astimezone()
+            headers.append(
+                plain(f"FIRST RETAINED ALLOCATION  {first_allocation:%Y-%m-%d}")
+            )
     if status:
         for text in textwrap.wrap(" · ".join(status), max(1, width)):
             headers.append(line((text, "reserved")))

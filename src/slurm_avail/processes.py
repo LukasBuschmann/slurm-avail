@@ -82,6 +82,7 @@ def run_captured(
             raise CommandCancelled("command cancelled")
         process = subprocess.Popen(
             list(command),
+            stdin=subprocess.DEVNULL,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,

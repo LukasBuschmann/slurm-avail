@@ -65,6 +65,7 @@ from .forecast_views import (
     forecast_table,
 )
 from .jobs_views import (
+    jobs_filter_line,
     jobs_for_scope,
     jobs_legend_lines,
     jobs_table,
@@ -83,6 +84,7 @@ from .node_views import (
 )
 from .output import placeholder_clusters
 from .processes import cancel_active_commands, reset_command_cancellation
+from .request_rate import requests_last_minute, reset_request_history
 from .ssh_auth import (
     SshControlTarget,
     close_control_sessions,
@@ -91,6 +93,55 @@ from .ssh_auth import (
 from .text import clipped_line, tab_line, visible_length
 from .usage import UsageHistory
 from .usage_views import usage_legend_lines, usage_table
+
+CTRL_F = ord("f") & 0x1F
+REPEATED_NAVIGATION_KEYS = frozenset(
+    {
+        curses.KEY_UP,
+        curses.KEY_DOWN,
+        curses.KEY_LEFT,
+        curses.KEY_RIGHT,
+        curses.KEY_PPAGE,
+        curses.KEY_NPAGE,
+        curses.KEY_HOME,
+        curses.KEY_END,
+    }
+)
+
+
+def read_keypress(
+    screen: curses.window,
+    pending_key: int | None,
+) -> tuple[int, int, int | None]:
+    """Read one action and batch consecutive terminal key repeats.
+
+    Rendering a large view can take long enough for terminal auto-repeat or a
+    mouse wheel to queue many navigation keys. Applying them one by one also
+    redraws the view one by one. Drain only identical navigation keys, preserve
+    the first different key, and let the caller apply the repeat count once.
+    """
+    key = pending_key if pending_key is not None else screen.getch()
+    pending_key = None
+    repeat = 1
+    if key not in REPEATED_NAVIGATION_KEYS:
+        return key, repeat, pending_key
+
+    screen.timeout(0)
+    try:
+        while True:
+            try:
+                next_key = screen.getch()
+            except StopIteration:  # Test screens use finite iterators.
+                next_key = -1
+            if next_key == key:
+                repeat += 1
+                continue
+            if next_key != -1:
+                pending_key = next_key
+            break
+    finally:
+        screen.timeout(200)
+    return key, repeat, pending_key
 
 
 def init_colors() -> dict[str, int]:
@@ -212,16 +263,32 @@ def draw_fixed_legend(
     divider_x: int,
     legend_x: int,
     styles: dict[str, int],
+    request_count: int,
 ) -> None:
+    footer = [
+        [("REQUESTS / MIN", "title")],
+        [(str(request_count), "normal")],
+    ]
+    footer_y = max(content_y, screen_height - len(footer))
     for row, legend_line in enumerate(legend):
         y = content_y + row
-        if y >= screen_height:
+        if y >= footer_y:
             break
         draw_spans(
             screen,
             y,
             legend_x,
             legend_line,
+            0,
+            screen_width,
+            styles,
+        )
+    for row, footer_line in enumerate(footer):
+        draw_spans(
+            screen,
+            footer_y + row,
+            legend_x,
+            footer_line,
             0,
             screen_width,
             styles,
@@ -345,6 +412,7 @@ def dashboard(
         curses.curs_set(0)
     screen.timeout(200)
     styles = init_colors()
+    reset_request_history()
 
     runtime_config = copy.deepcopy(initial_config)
     editable_config = copy.deepcopy(initial_config)
@@ -376,6 +444,8 @@ def dashboard(
     usage.scope = initial_jobs_scope_index
     usage_executor = concurrent.futures.ThreadPoolExecutor(max_workers=4)
     jobs_job_indices: dict[str, int] = {}
+    jobs_name_filter = ""
+    jobs_filter_editing = False
     jobs_selection_changed = True
     estimate_request = EstimateRequest()
     estimate_selection = 0
@@ -391,6 +461,7 @@ def dashboard(
     forecast_resolution_index = FORECAST_RESOLUTIONS.index(60)
     vertical_offsets = {view: 0 for view in VIEWS}
     horizontal_offsets = {view: 0 for view in VIEWS}
+    pending_key: int | None = None
     control_targets = configured_control_targets(runtime_config, user_override)
 
     reset_command_cancellation()
@@ -642,6 +713,7 @@ def dashboard(
             content_y = 2
             viewport_height = max(1, screen_height - content_y)
             content_width, fixed_divider_x, fixed_legend_x = panel_layout(screen_width)
+            request_count = requests_last_minute(now)
 
             screen.erase()
             draw_spans(
@@ -742,6 +814,7 @@ def dashboard(
                     fixed_divider_x,
                     fixed_legend_x,
                     styles,
+                    request_count,
                 )
             elif active_view == "filesystems":
                 table = filesystem_table(clusters)
@@ -804,6 +877,7 @@ def dashboard(
                     fixed_divider_x,
                     fixed_legend_x,
                     styles,
+                    request_count,
                 )
             elif active_view == "logins":
                 table = login_table(clusters)
@@ -861,6 +935,7 @@ def dashboard(
                     fixed_divider_x,
                     fixed_legend_x,
                     styles,
+                    request_count,
                 )
             elif active_view == "usage":
                 results = usage.update(
@@ -875,7 +950,7 @@ def dashboard(
                     [cluster.name for cluster in clusters],
                     results,
                     content_width,
-                    max(2, min(7, (viewport_height - 11) // 2)),
+                    max(2, min(7, (viewport_height - 12) // 2)),
                 )
                 body_height = max(1, viewport_height - len(headers))
                 max_vertical = max(0, len(body) - body_height)
@@ -899,8 +974,14 @@ def dashboard(
                     fixed_divider_x,
                     fixed_legend_x,
                     styles,
+                    request_count,
                 )
             elif active_view == "jobs":
+                filter_line = jobs_filter_line(
+                    clusters, jobs_cluster_index, jobs_name_filter, jobs_filter_editing
+                )
+                jobs_screen_height = screen_height - bool(filter_line)
+                jobs_viewport_height = max(1, jobs_screen_height - content_y)
                 scope_key = (
                     "ALL"
                     if jobs_cluster_index == 0
@@ -918,6 +999,7 @@ def dashboard(
                     clusters,
                     jobs_cluster_index,
                     selected_job_index,
+                    jobs_name_filter,
                 )
                 jobs_job_indices[scope_key] = selected_job_index
                 legend = jobs_legend_lines(
@@ -936,7 +1018,7 @@ def dashboard(
                     ),
                 )
                 header_height = len(headers)
-                available_below_header = max(1, viewport_height - header_height)
+                available_below_header = max(1, jobs_viewport_height - header_height)
                 detail_height = min(
                     len(details),
                     max(0, available_below_header - 1),
@@ -1016,7 +1098,18 @@ def dashboard(
                     fixed_divider_x,
                     fixed_legend_x,
                     styles,
+                    request_count,
                 )
+                if filter_line:
+                    draw_spans(
+                        screen,
+                        screen_height - 1,
+                        0,
+                        filter_line,
+                        0,
+                        content_width,
+                        styles,
+                    )
             elif active_view == "estimate":
                 selection_count = len(ESTIMATE_FIELDS) + 1 + len(clusters)
                 estimate_selection = min(
@@ -1100,6 +1193,7 @@ def dashboard(
                     fixed_divider_x,
                     fixed_legend_x,
                     styles,
+                    request_count,
                 )
             elif active_view == "forecast":
                 resolution_minutes = FORECAST_RESOLUTIONS[forecast_resolution_index]
@@ -1201,6 +1295,7 @@ def dashboard(
                     fixed_divider_x,
                     fixed_legend_x,
                     styles,
+                    request_count,
                 )
 
             else:
@@ -1285,10 +1380,61 @@ def dashboard(
                     fixed_divider_x,
                     fixed_legend_x,
                     styles,
+                    request_count,
                 )
 
             screen.refresh()
-            key = screen.getch()
+            key, key_repeat, pending_key = read_keypress(screen, pending_key)
+            if active_view == "jobs" and key == CTRL_F:
+                if jobs_filter_editing or jobs_name_filter:
+                    jobs_name_filter = ""
+                    jobs_filter_editing = False
+                    jobs_job_indices.clear()
+                    vertical_offsets[active_view] = 0
+                    horizontal_offsets[active_view] = 0
+                    jobs_selection_changed = True
+                else:
+                    jobs_filter_editing = True
+                continue
+            editing_jobs_filter = active_view == "jobs" and jobs_filter_editing
+            jobs_navigation_keys = {
+                curses.KEY_UP,
+                curses.KEY_DOWN,
+                curses.KEY_PPAGE,
+                curses.KEY_NPAGE,
+                curses.KEY_HOME,
+                curses.KEY_END,
+                curses.KEY_LEFT,
+                curses.KEY_RIGHT,
+            }
+            if editing_jobs_filter and key not in jobs_navigation_keys:
+                if key in (10, 13, curses.KEY_ENTER, 27):
+                    jobs_name_filter = " ".join(jobs_name_filter.split())
+                    jobs_filter_editing = False
+                    continue
+                if key == 21:
+                    if jobs_name_filter:
+                        jobs_name_filter = ""
+                        jobs_job_indices.clear()
+                        vertical_offsets[active_view] = 0
+                        horizontal_offsets[active_view] = 0
+                        jobs_selection_changed = True
+                    continue
+                if key in (curses.KEY_BACKSPACE, 127, 8):
+                    if jobs_name_filter:
+                        jobs_name_filter = jobs_name_filter[:-1]
+                        jobs_job_indices.clear()
+                        vertical_offsets[active_view] = 0
+                        horizontal_offsets[active_view] = 0
+                        jobs_selection_changed = True
+                    continue
+                if 32 <= key < curses.KEY_MIN:
+                    jobs_name_filter += chr(key)
+                    jobs_job_indices.clear()
+                    vertical_offsets[active_view] = 0
+                    horizontal_offsets[active_view] = 0
+                    jobs_selection_changed = True
+                    continue
             if key in (ord("q"), ord("Q")):
                 break
             backtab_key = getattr(curses, "KEY_BTAB", None)
@@ -1300,6 +1446,7 @@ def dashboard(
                 active_view = visible_views[
                     (view_index + direction) % len(visible_views)
                 ]
+                jobs_filter_editing = False
                 if active_view == "jobs":
                     jobs_selection_changed = True
             elif active_view == "usage" and key in (
@@ -1311,7 +1458,7 @@ def dashboard(
                 usage.zoom(-1 if key in (ord("+"), ord("=")) else 1)
                 vertical_offsets[active_view] = 0
             elif active_view == "usage" and key in (curses.KEY_LEFT, curses.KEY_RIGHT):
-                usage.move(-1 if key == curses.KEY_LEFT else 1)
+                usage.move(-key_repeat if key == curses.KEY_LEFT else key_repeat)
                 vertical_offsets[active_view] = 0
             elif active_view == "usage" and key == curses.KEY_END:
                 usage.follow_now = True
@@ -1359,8 +1506,9 @@ def dashboard(
                     else clusters[jobs_cluster_index - 1].name
                 )
                 selected_job = jobs_job_indices.get(scope_key, 0)
-                if selected_job > 0:
-                    jobs_job_indices[scope_key] = selected_job - 1
+                next_job = max(0, selected_job - key_repeat)
+                if next_job != selected_job:
+                    jobs_job_indices[scope_key] = next_job
                     jobs_selection_changed = True
             elif active_view == "jobs" and key == curses.KEY_DOWN:
                 scope_key = (
@@ -1369,8 +1517,16 @@ def dashboard(
                     else clusters[jobs_cluster_index - 1].name
                 )
                 selected_job = jobs_job_indices.get(scope_key, 0)
-                if selected_job + 1 < len(jobs_for_scope(clusters, jobs_cluster_index)):
-                    jobs_job_indices[scope_key] = selected_job + 1
+                job_count = len(
+                    jobs_for_scope(
+                        clusters,
+                        jobs_cluster_index,
+                        jobs_name_filter,
+                    )
+                )
+                next_job = min(max(0, job_count - 1), selected_job + key_repeat)
+                if next_job != selected_job:
+                    jobs_job_indices[scope_key] = next_job
                     jobs_selection_changed = True
             elif (
                 active_view == "estimate"
@@ -1398,28 +1554,30 @@ def dashboard(
                     direction = -1 if key == curses.KEY_LEFT else 1
                     estimate_time_component = min(
                         2,
-                        max(0, estimate_time_component + direction),
+                        max(0, estimate_time_component + direction * key_repeat),
                     )
                 else:
                     direction = 1 if key in (curses.KEY_UP, curses.KEY_RIGHT) else -1
-                    candidate = adjust_estimate_value(
-                        estimate_request,
-                        field,
-                        direction,
-                        estimate_time_component,
-                    )
+                    candidate = estimate_request
+                    for _ in range(key_repeat):
+                        candidate = adjust_estimate_value(
+                            candidate,
+                            field,
+                            direction,
+                            estimate_time_component,
+                        )
                     if candidate != estimate_request:
                         estimate_request = candidate
                         estimate_results.clear()
                         estimate_message = "Request changed; press t to test"
             elif active_view == "estimate" and key == curses.KEY_UP:
-                estimate_selection -= 1
+                estimate_selection -= key_repeat
             elif active_view == "estimate" and key == curses.KEY_DOWN:
-                estimate_selection += 1
+                estimate_selection += key_repeat
             elif active_view == "estimate" and key == curses.KEY_PPAGE:
-                estimate_selection -= max(1, page_height - 1)
+                estimate_selection -= key_repeat * max(1, page_height - 1)
             elif active_view == "estimate" and key == curses.KEY_NPAGE:
-                estimate_selection += max(1, page_height - 1)
+                estimate_selection += key_repeat * max(1, page_height - 1)
             elif active_view == "estimate" and key == curses.KEY_HOME:
                 estimate_selection = 0
             elif active_view == "estimate" and key == curses.KEY_END:
@@ -1577,25 +1735,25 @@ def dashboard(
                 and config_editing_cluster is not None
                 and key == curses.KEY_UP
             ):
-                config_field_selection -= 1
+                config_field_selection -= key_repeat
             elif (
                 active_view == "config"
                 and config_editing_cluster is not None
                 and key == curses.KEY_DOWN
             ):
-                config_field_selection += 1
+                config_field_selection += key_repeat
             elif (
                 active_view == "config"
                 and config_editing_cluster is not None
                 and key == curses.KEY_PPAGE
             ):
-                config_field_selection -= max(1, page_height - 1)
+                config_field_selection -= key_repeat * max(1, page_height - 1)
             elif (
                 active_view == "config"
                 and config_editing_cluster is not None
                 and key == curses.KEY_NPAGE
             ):
-                config_field_selection += max(1, page_height - 1)
+                config_field_selection += key_repeat * max(1, page_height - 1)
             elif (
                 active_view == "config"
                 and config_editing_cluster is not None
@@ -1624,7 +1782,7 @@ def dashboard(
                 field = visible_cluster_fields(cluster)[config_field_selection]
                 if field.kind == "choice":
                     direction = -1 if key == curses.KEY_LEFT else 1
-                    cycle_cluster_field(cluster, field, direction)
+                    cycle_cluster_field(cluster, field, direction * key_repeat)
                     config_dirty = True
                     config_message = f"Changed {field.label}; press s to apply"
             elif (
@@ -1795,25 +1953,25 @@ def dashboard(
                 and config_editing_cluster is None
                 and key == curses.KEY_UP
             ):
-                config_selection -= 1
+                config_selection -= key_repeat
             elif (
                 active_view == "config"
                 and config_editing_cluster is None
                 and key == curses.KEY_DOWN
             ):
-                config_selection += 1
+                config_selection += key_repeat
             elif (
                 active_view == "config"
                 and config_editing_cluster is None
                 and key == curses.KEY_PPAGE
             ):
-                config_selection -= max(1, page_height - 1)
+                config_selection -= key_repeat * max(1, page_height - 1)
             elif (
                 active_view == "config"
                 and config_editing_cluster is None
                 and key == curses.KEY_NPAGE
             ):
-                config_selection += max(1, page_height - 1)
+                config_selection += key_repeat * max(1, page_height - 1)
             elif (
                 active_view == "config"
                 and config_editing_cluster is None
@@ -2081,21 +2239,21 @@ def dashboard(
                 except (OSError, ValueError) as error:
                     config_message = f"Reload failed: {error}"
             elif key == curses.KEY_UP:
-                vertical_offsets[active_view] -= 1
+                vertical_offsets[active_view] -= key_repeat
             elif key == curses.KEY_DOWN:
-                vertical_offsets[active_view] += 1
+                vertical_offsets[active_view] += key_repeat
             elif key == curses.KEY_PPAGE:
-                vertical_offsets[active_view] -= max(1, page_height - 1)
+                vertical_offsets[active_view] -= key_repeat * max(1, page_height - 1)
             elif key == curses.KEY_NPAGE:
-                vertical_offsets[active_view] += max(1, page_height - 1)
+                vertical_offsets[active_view] += key_repeat * max(1, page_height - 1)
             elif key == curses.KEY_HOME:
                 vertical_offsets[active_view] = 0
             elif key == curses.KEY_END:
                 vertical_offsets[active_view] = max_vertical
             elif key == curses.KEY_LEFT:
-                horizontal_offsets[active_view] -= 4
+                horizontal_offsets[active_view] -= 4 * key_repeat
             elif key == curses.KEY_RIGHT:
-                horizontal_offsets[active_view] += 4
+                horizontal_offsets[active_view] += 4 * key_repeat
             elif key in (ord("r"), ord("R")) and not refresh_futures and live_views:
                 refresh_includes_filesystems = "filesystems" in visible_views and (
                     active_view == "filesystems" or now >= next_filesystem_refresh

@@ -36,6 +36,7 @@ from .models import (
     UserJob,
 )
 from .processes import run_captured, wait_or_cancel
+from .request_rate import record_request
 from .ssh_auth import multiplex_options
 
 UNAVAILABLE_RE = re.compile(
@@ -1179,6 +1180,7 @@ def run_endpoint(
     settings: DashboardSettings,
     timeout: int | None = None,
 ) -> subprocess.CompletedProcess[str]:
+    record_request()
     command_timeout = timeout or settings.command_timeout_seconds
     if cluster_config.mode == "local":
         return run_local(command, command_timeout)

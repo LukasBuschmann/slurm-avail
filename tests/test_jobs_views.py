@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 from slurm_avail.jobs_views import (
+    fuzzy_job_name_match,
     job_row,
+    jobs_filter_line,
+    jobs_for_scope,
     jobs_table,
     priority_distribution_rows,
     sticky_jobs_headers,
@@ -14,6 +17,121 @@ from slurm_avail.models import (
     PriorityFactors,
     UserJob,
 )
+
+
+def named_job(
+    job_id: str,
+    name: str,
+    *,
+    historical: bool = False,
+) -> UserJob:
+    return UserJob(
+        job_id=job_id,
+        partition="cpu",
+        name=name,
+        state="COMPLETED" if historical else "PENDING",
+        reason="Resources",
+        priority="1",
+        start=1_787_188_250 if historical else None,
+        end=1_787_191_850 if historical else None,
+        scheduled_nodes=(),
+        time_limit="01:00:00",
+        node_count=1,
+        cpu_count=1,
+        memory="1G",
+        tres_per_node="",
+        allocated_tres="",
+        account="project",
+        qos="normal",
+        historical=historical,
+    )
+
+
+def test_fuzzy_job_name_filter_matches_words_as_subsequences() -> None:
+    cluster = Cluster(
+        name="CPU",
+        host="login",
+        jobs=[
+            named_job("1", "protein-training"),
+            named_job("2", "unrelated-analysis"),
+        ],
+        past_jobs=[named_job("3", "trained-model", historical=True)],
+    )
+
+    assert fuzzy_job_name_match("Protein-Training", "PTN trn")
+    assert not fuzzy_job_name_match("unrelated-analysis", "PTN trn")
+    assert [
+        job.job_id for _cluster, job in jobs_for_scope([cluster], 0, "PTN trn")
+    ] == ["1"]
+    assert [job.job_id for _cluster, job in jobs_for_scope([cluster], 0, "tr mdl")] == [
+        "3"
+    ]
+
+
+def test_jobs_table_shows_filtered_details_without_filter_in_header() -> None:
+    cluster = Cluster(
+        name="CPU",
+        host="login",
+        user="researcher",
+        jobs=[
+            named_job("1", "protein-training"),
+            named_job("2", "unrelated-analysis"),
+        ],
+        past_jobs=[named_job("3", "trained-model", historical=True)],
+    )
+
+    headers, body, details, *_rest = jobs_table(
+        [cluster],
+        0,
+        0,
+        "ptn trn",
+    )
+    text = "\n".join(
+        "".join(value for value, _style in row) for row in headers + body + details
+    )
+
+    assert 'filter "' not in text
+    assert "protein-training" in text
+    assert "unrelated-analysis" not in text
+    assert "trained-model" not in text
+    assert "SELECTED JOB 1" in text
+    assert "No history jobs match the name filter." in text
+
+
+def test_jobs_filter_line_marks_editing_and_hides_when_cleared() -> None:
+    cluster = Cluster(
+        name="CPU",
+        host="login",
+        jobs=[named_job("1", "protein-training")],
+    )
+
+    text = "".join(
+        value for value, _style in jobs_filter_line([cluster], 0, "ptn", True)
+    )
+
+    assert 'filter "ptn_" · 1 matches' in text
+    assert jobs_filter_line([cluster], 0, "") == []
+
+
+def test_jobs_table_reports_when_filter_matches_nothing() -> None:
+    cluster = Cluster(
+        name="CPU",
+        host="login",
+        jobs=[named_job("1", "protein-training")],
+        past_jobs=[named_job("2", "trained-model", historical=True)],
+    )
+
+    headers, body, details, *_rest = jobs_table([cluster], 0, 0, "missing")
+    text = "\n".join("".join(value for value, _style in row) for row in headers + body)
+
+    assert 'filter "' not in text
+    footer = "".join(
+        value for value, _style in jobs_filter_line([cluster], 0, "missing")
+    )
+    assert 'filter "missing" · 0 matches' in footer
+    assert "No current jobs match the name filter." in text
+    assert "No history jobs match the name filter." in text
+    assert details == []
 
 
 def test_jobs_table_shows_scheduler_placement_and_priority_details() -> None:

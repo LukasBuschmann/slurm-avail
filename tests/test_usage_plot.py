@@ -88,7 +88,7 @@ def test_wider_calendar_bars_do_not_multiply_totals():
     columns = spread_usage_bars(values, [0, 3600, 7200], 40)
     assert columns == [8] * 20 + [16] * 20
     rendered = text(usage_chart(columns, "CPU-hours", "cpu", 5, total=sum(values)))
-    assert "total 24 h" in rendered
+    assert "shown 24 h" in rendered
     # A few seconds in the first partial period must still be visible.
     assert spread_usage_bars([8, 16], [0, 1, 86400], 40) == [8] + [16] * 39
 

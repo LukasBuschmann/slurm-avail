@@ -34,6 +34,11 @@ USAGE_WINDOWS = (
     ("10y", 10 * 31536000),
 )
 USAGE_REFRESH_SECONDS = 300
+# Slurm uses a zero start timestamp as its internal "not specified" sentinel.
+# Asking sacct for exactly the Unix epoch therefore falls back to its default
+# window (midnight today) instead of querying retained history.
+USAGE_HISTORY_START = 1.0
+USAGE_REFRESH_OVERLAP_SECONDS = 86400
 
 
 @dataclass(frozen=True)
@@ -44,6 +49,7 @@ class UsageJob:
     end: float
     cpus: int
     gpus: int
+    running: bool = False
 
 
 @dataclass
@@ -110,7 +116,8 @@ def parse_usage(output: str, now: float) -> UsageResult:
                 omit(job_id, "invalid start time")
             continue
         end = parse_slurm_time(end_text, "+0000")
-        if state in ("RUNNING", "SUSPENDED", "COMPLETING", "RESIZING"):
+        running = state in ("RUNNING", "SUSPENDED", "COMPLETING", "RESIZING")
+        if running:
             end = now
         # Failed launch records can have no allocation and equal start/end times.
         if end == start:
@@ -125,7 +132,13 @@ def parse_usage(output: str, now: float) -> UsageResult:
             omit(job_id, "missing allocated resources (AllocTRES)")
             continue
         job = UsageJob(
-            job_id, submit, start, min(end, now), int(cpu_text), parse_gpu_count(tres)
+            job_id,
+            submit,
+            start,
+            min(end, now),
+            int(cpu_text),
+            parse_gpu_count(tres),
+            running,
         )
         if job.end > job.start and job not in seen:
             result.jobs.append(job)
@@ -167,7 +180,6 @@ def fetch_usage(
                     stderr,
                     re.IGNORECASE,
                 ):
-                    # Older sacct expands allocated array tasks without this flag.
                     expand_arrays = False
                     continue
                 break
@@ -212,8 +224,51 @@ def usage_interval_buckets(
     return cpu, gpu
 
 
+def usage_totals(jobs: list[UsageJob]) -> tuple[float, float]:
+    cpu = 0.0
+    gpu = 0.0
+    for job in jobs:
+        hours = max(0.0, job.end - job.start) / 3600
+        cpu += hours * job.cpus
+        gpu += hours * job.gpus
+    return cpu, gpu
+
+
+def incremental_usage_start(result: UsageResult) -> float:
+    start = max(
+        USAGE_HISTORY_START,
+        result.checked_at - USAGE_REFRESH_OVERLAP_SECONDS,
+    )
+    running_starts = [job.start for job in result.jobs if job.running]
+    return min([start, *running_starts])
+
+
+def merge_usage_results(
+    previous: UsageResult,
+    current: UsageResult,
+    replace_start: float,
+) -> UsageResult:
+    """Replace the refreshed tail while retaining older accounting rows."""
+    current_keys = {(job.job_id, job.submit, job.start) for job in current.jobs}
+    jobs = {
+        job
+        for job in previous.jobs
+        if job.start < replace_start
+        and (job.job_id, job.submit, job.start) not in current_keys
+    }
+    jobs.update(current.jobs)
+    issues = list(dict.fromkeys([*previous.issues, *current.issues]))[:3]
+    return UsageResult(
+        jobs=sorted(jobs, key=lambda job: (job.start, job.job_id)),
+        error=current.error,
+        incomplete=max(previous.incomplete, current.incomplete),
+        checked_at=current.checked_at,
+        issues=issues,
+    )
+
+
 class UsageHistory:
-    """Bounded range cache and background requests owned by the UI thread."""
+    """Full retained-history cache and background requests owned by the UI thread."""
 
     def __init__(self) -> None:
         self.window_index = 3
@@ -221,11 +276,11 @@ class UsageHistory:
         self.follow_now = True
         self.scope = 0
         self.generation = -1
-        self.cache: OrderedDict[tuple[str, float, float], UsageResult] = OrderedDict()
+        self.cache: OrderedDict[str, UsageResult] = OrderedDict()
         self.pending: dict[
             concurrent.futures.Future[UsageResult], tuple[str, float, float]
         ] = {}
-        self.invalidated: set[tuple[str, float, float]] = set()
+        self.invalidated: set[str] = set()
         self.status: dict[str, UsageResult] = {}
 
     @property
@@ -238,22 +293,17 @@ class UsageHistory:
         )
 
     def move(self, direction: int) -> None:
+        was_following = self.follow_now
         now = float(int(time.time()))
         self.end = min(now, self.end + direction * USAGE_WINDOWS[self.window_index][1])
         self.follow_now = self.end >= now
+        if self.follow_now and not was_following:
+            self.invalidated.update(self.cache)
 
     def refresh(self) -> None:
-        old_range = (self.start, self.end)
         if self.follow_now:
             self.end = float(int(time.time()))
-        if self.start >= old_range[1] or self.end <= old_range[0]:
-            return  # Returning to now from a separate historical period.
-        for key, result in list(self.cache.items()):
-            if key[1:] == old_range:
-                new_key = (key[0], self.start, self.end)
-                # Retain the previous snapshot while its replacement is fetched.
-                self.cache[new_key] = result
-                self.invalidated.add(new_key)
+        self.invalidated.update(self.cache)
 
     def reset(self, generation: int) -> None:
         for future in self.pending:
@@ -276,21 +326,23 @@ class UsageHistory:
             self.reset(generation)
         for future in list(self.pending):
             if future.done():
-                key = self.pending.pop(future)
+                cluster_name, request_start, _request_end = self.pending.pop(future)
                 try:
                     result = future.result()
                 except Exception:
                     result = UsageResult(error="Accounting request failed")
-                previous = self.cache.get(key)
+                previous = self.cache.get(cluster_name)
                 if (
                     result.error
                     and previous is not None
                     and (previous.error is None or previous.stale)
                 ):
                     result = replace(previous, error=result.error, stale=True)
-                self.cache[key] = result
-                self.status[key[0]] = result
-                self.invalidated.discard(key)
+                elif previous is not None and request_start > USAGE_HISTORY_START:
+                    result = merge_usage_results(previous, result, request_start)
+                self.cache[cluster_name] = result
+                self.status[cluster_name] = result
+                self.invalidated.discard(cluster_name)
         if self.follow_now and time.time() - self.end >= USAGE_REFRESH_SECONDS:
             self.refresh()
         clusters = active_cluster_configs(config)
@@ -298,17 +350,16 @@ class UsageHistory:
         selected = (
             clusters if self.scope == 0 else clusters[self.scope - 1 : self.scope]
         )
-        wanted = {(c.name, self.start, self.end) for c in selected}
-        for future, key in list(self.pending.items()):
-            if key not in wanted and future.cancel():
+        wanted = {cluster.name for cluster in selected}
+        for future, (cluster_name, _start, _end) in list(self.pending.items()):
+            if cluster_name not in wanted and future.cancel():
                 del self.pending[future]
         results: dict[str, UsageResult | None] = {}
         for cluster in selected:
-            key = (cluster.name, self.start, self.end)
-            result = self.cache.get(key)
+            result = self.cache.get(cluster.name)
             if result is not None:
-                self.cache.move_to_end(key)
-            needs_refresh = result is None or key in self.invalidated
+                self.cache.move_to_end(cluster.name)
+            needs_refresh = result is None or cluster.name in self.invalidated
             results[cluster.name] = (
                 replace(
                     result, refreshing=True, stale=result.error is None or result.stale
@@ -318,20 +369,28 @@ class UsageHistory:
             )
             if (
                 needs_refresh
-                and key not in self.pending.values()
+                and cluster.name
+                not in {pending[0] for pending in self.pending.values()}
                 and len(self.pending) < 4
             ):
+                request_end = time.time()
+                request_start = (
+                    incremental_usage_start(result)
+                    if result is not None
+                    else USAGE_HISTORY_START
+                )
                 future = executor.submit(
                     fetch_usage,
                     copy.deepcopy(cluster),
                     copy.deepcopy(config.settings),
                     user_override,
-                    self.start,
-                    self.end,
+                    request_start,
+                    request_end,
                     preferred.get(cluster.name),
                 )
-                self.pending[future] = key
-        while len(self.cache) > max(32, len(clusters)):
-            old_key, _ = self.cache.popitem(last=False)
-            self.invalidated.discard(old_key)
+                self.pending[future] = (
+                    cluster.name,
+                    request_start,
+                    request_end,
+                )
         return results
