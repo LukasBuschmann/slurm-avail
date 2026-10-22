@@ -64,13 +64,23 @@ def render_once(
 ) -> None:
     print(spans_text(tab_line("nodes", context, active_views(settings))))
     print()
-    headers = [cluster_header(cluster) for cluster in clusters]
-    bodies = [cluster_body(cluster, colored=False) for cluster in clusters]
+    headers = [
+        cluster_header(cluster, settings.node_display_mode) for cluster in clusters
+    ]
+    bodies = [
+        cluster_body(
+            cluster,
+            colored=False,
+            display_mode=settings.node_display_mode,
+        )
+        for cluster in clusters
+    ]
     legend = legend_lines(
         age_seconds=0,
         refreshing=False,
         colored=False,
         refresh_seconds=settings.node_refresh_seconds,
+        display_mode=settings.node_display_mode,
     )
     header_height = max(len(header) for header in headers)
     body_height = max((len(body) for body in bodies), default=0)

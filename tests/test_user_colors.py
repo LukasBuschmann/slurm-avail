@@ -13,9 +13,13 @@ from slurm_avail.node_views import (
     abbreviated_node_names,
     architecture_groups,
     cluster_body,
+    cluster_body_layout,
     cluster_header,
     gpu_node_lines,
     legend_lines,
+    node_architecture,
+    node_detail_lines,
+    selectable_nodes,
 )
 from slurm_avail.text import capacity_bar, visible_length
 
@@ -96,7 +100,7 @@ def test_node_view_colors_current_users_gpu_allocation_and_reservation() -> None
     assert "RAM  " in header_text
     assert "[" not in header_text
     assert "]" not in header_text
-    assert "2/8" in header_text
+    assert "6/8" in header_text
     assert "mine" in header_styles
     assert "mine_reserved" in header_styles
     assert "mine" in body_styles
@@ -109,7 +113,7 @@ def test_node_view_colors_current_users_gpu_allocation_and_reservation() -> None
         if "".join(text for text, _style in row).startswith("GPU  ")
     )
     capacity_styles = [style for text, style in gpu_row if text and set(text) == {"▆"}]
-    assert capacity_styles == ["mine", "mine_reserved", "busy", "free"]
+    assert capacity_styles == ["mine", "mine_reserved", "free", "busy"]
 
 
 def test_gpu_and_cpu_cluster_node_sections_start_at_same_height() -> None:
@@ -163,22 +167,24 @@ def test_node_headers_use_compact_titles_and_aligned_status_sections() -> None:
 
     assert normal_text[0] == "CPU"
     assert "===" not in normal_text[0]
-    assert "CAPACITY  free / total" in normal_text
+    assert "USAGE  used / total" in normal_text
     assert "NODES  1" in normal_text
     assert failed_text[2] == "STATUS"
     assert "NODES  0" in failed_text
     assert len(normal_header) == len(failed_header)
 
 
-def test_node_status_marker_is_separate_from_hostname() -> None:
+def test_node_status_uses_name_color_without_a_suffix_marker() -> None:
     node = gpu_node("gpu01", reserved=True)
 
-    text = "".join(value for value, _style in gpu_node_lines(node, colored=True)[0])
+    row = gpu_node_lines(node, colored=True)[0]
+    text = "".join(value for value, _style in row)
 
-    assert text.endswith("gpu01 R")
+    assert text.endswith("gpu01")
+    assert row[-1] == ("gpu01", "reserved")
 
 
-def test_long_node_name_is_truncated_after_bars_without_hiding_status() -> None:
+def test_long_node_name_is_truncated_after_bars_without_a_status_suffix() -> None:
     node = gpu_node("compute-node-with-a-long-name", reserved=True)
 
     rows = gpu_node_lines(node, colored=True)
@@ -186,8 +192,170 @@ def test_long_node_name_is_truncated_after_bars_without_hiding_status() -> None:
 
     assert len(rows) == 1
     assert text.startswith("  G ")
-    assert text.endswith("comp… R")
+    assert text.endswith("comput…")
+    assert " R" not in text
     assert visible_length(rows[0]) == 28
+
+
+def test_node_cursor_uses_visible_architecture_order_and_highlights_row() -> None:
+    smaller = gpu_node("gpu-small")
+    larger = gpu_node("gpu-large")
+    larger.gpu_total = 8
+    hidden = gpu_node("gpu-reserved", reserved=True)
+    cluster = Cluster(
+        name="GPU",
+        host="login",
+        focus="gpu",
+        nodes=[smaller, hidden, larger],
+    )
+
+    assert [node.name for node in selectable_nodes(cluster)] == [
+        "gpu-large",
+        "gpu-small",
+    ]
+
+    body = cluster_body(
+        cluster,
+        colored=True,
+        selected_node_name="gpu-small",
+    )
+    selected_rows = [
+        row for row in body if any(text and style == "selected" for text, style in row)
+    ]
+    assert len(selected_rows) == 1
+    assert "gpu-sm…" in "".join(text for text, _style in selected_rows[0])
+    assert selected_rows[0][0] == ("└ ", "selected")
+    assert all(style == "selected" for _text, style in selected_rows[0])
+
+
+def test_node_layout_starts_with_five_per_architecture_and_shares_extra_rows() -> None:
+    groups: list[list[Node]] = []
+    for prefix, cores in (("a", 96), ("b", 64), ("c", 32)):
+        nodes = [cpu_node(f"{prefix}{index:02}") for index in range(10)]
+        for node in nodes:
+            node.cpu_total = cores
+        groups.append(nodes)
+    cluster = Cluster(
+        name="CPU",
+        host="login",
+        focus="cpu",
+        nodes=[node for group in groups for node in group],
+    )
+
+    compact_body, compact_positions, _compact_architectures, starts = (
+        cluster_body_layout(
+            cluster,
+            colored=True,
+            max_height=26,
+        )
+    )
+    expanded_body, expanded_positions, _expanded_architectures, _expanded_starts = (
+        cluster_body_layout(
+            cluster,
+            colored=True,
+            max_height=30,
+        )
+    )
+
+    assert len(compact_body) == 26
+    assert [
+        sum(name.startswith(prefix) for name in compact_positions)
+        for prefix in ("a", "b", "c")
+    ] == [5, 5, 5]
+    assert (
+        sum("… 5 more" in "".join(text for text, _style in row) for row in compact_body)
+        == 3
+    )
+    assert len(expanded_body) == 30
+    assert [
+        sum(name.startswith(prefix) for name in expanded_positions)
+        for prefix in ("a", "b", "c")
+    ] == [7, 6, 6]
+    assert all(start == 0 for start in starts.values())
+
+
+def test_node_layout_marks_selected_and_open_architecture() -> None:
+    nodes = [cpu_node(f"n{index}") for index in range(6)]
+    cluster = Cluster(name="CPU", host="login", focus="cpu", nodes=nodes)
+    architecture = node_architecture(nodes[0])
+
+    body, _nodes, architecture_positions, _starts = cluster_body_layout(
+        cluster,
+        colored=True,
+        selected_architecture=architecture,
+        open_architecture=architecture,
+        max_height=8,
+    )
+
+    assert architecture_positions[architecture] == 0
+    assert "".join(text for text, _style in body[0]).startswith("32 CPU")
+    assert all(
+        style == "selected" for header_row in body[:2] for _text, style in header_row
+    )
+    assert any(style != "selected" for _text, style in body[2])
+
+
+def test_open_architecture_reports_nodes_above_and_below_its_slice() -> None:
+    nodes = [cpu_node(f"n{index:02}") for index in range(12)]
+    cluster = Cluster(name="CPU", host="login", focus="cpu", nodes=nodes)
+    architecture = node_architecture(nodes[0])
+
+    body, positions, _architecture_positions, starts = cluster_body_layout(
+        cluster,
+        colored=True,
+        selected_architecture=architecture,
+        open_architecture=architecture,
+        selected_node_name="n07",
+        anchor_node_name="n07",
+        max_height=9,
+    )
+    text = ["".join(value for value, _style in row) for row in body]
+
+    assert starts[architecture] == 3
+    assert {f"n{index:02}" for index in range(3, 8)} <= positions.keys()
+    assert "│ … 3 more" in text
+    assert "└ … 4 more" in text
+
+
+def test_node_layout_scrolls_only_the_selected_architecture_slice() -> None:
+    first = [cpu_node(f"a{index:02}") for index in range(10)]
+    second = [cpu_node(f"b{index:02}") for index in range(10)]
+    for node in first:
+        node.cpu_total = 64
+    cluster = Cluster(
+        name="CPU",
+        host="login",
+        focus="cpu",
+        nodes=[*first, *second],
+    )
+
+    _body, positions, _architecture_positions, starts = cluster_body_layout(
+        cluster,
+        colored=True,
+        anchor_node_name="a09",
+        max_height=17,
+    )
+
+    assert {f"a{index:02}" for index in range(5, 10)} <= positions.keys()
+    assert {f"b{index:02}" for index in range(5)} <= positions.keys()
+    assert starts[node_architecture(first[0])] == 5
+    assert starts[node_architecture(second[0])] == 0
+
+
+def test_node_details_show_full_name_and_exact_scheduler_counts() -> None:
+    node = gpu_node("compute-node-with-a-full-name")
+    node.gpu_type = "h100"
+    cluster = Cluster(name="GPU", host="login", focus="gpu", nodes=[node])
+
+    text = "\n".join(
+        "".join(value for value, _style in row)
+        for row in node_detail_lines(cluster, node)
+    )
+
+    assert "compute-node-with-a-full-name" in text
+    assert "2 allocated · 2 free · 4 total · type  h100" in text
+    assert "8 allocated · 24 free · 32 total" in text
+    assert "16,384 MiB allocated · 114,688 MiB free · 131,072 MiB total" in text
 
 
 def test_repeated_parts_of_long_node_names_are_abbreviated() -> None:
@@ -261,7 +429,7 @@ def test_gpu_node_bar_size_does_not_depend_on_gpu_count() -> None:
     assert "G " in row_text
     assert "[" not in row_text
     assert "]" not in row_text
-    assert segment_styles == ["busy", "free", "busy", "cpu", "busy", "memory"]
+    assert segment_styles == ["free", "busy", "cpu", "busy", "memory", "busy"]
 
 
 def test_cluster_body_groups_nodes_by_scheduler_visible_architecture() -> None:
@@ -284,7 +452,7 @@ def test_cluster_body_groups_nodes_by_scheduler_visible_architecture() -> None:
 
     assert body_text.count("2 nodes") == 1
     assert body_text.count("1 node") == 1
-    assert body_text.count("4×h100") == 2
+    assert sum("4×h100" in row for row in body_text) == 2
     assert "32 CPU · 128G RAM" in body_text
     assert "32 CPU · 256G RAM" in body_text
     assert body_text.index("32 CPU · 256G RAM") < body_text.index("32 CPU · 128G RAM")
@@ -366,11 +534,11 @@ def test_architecture_group_omits_empty_status_summaries() -> None:
     assert "reserved" not in body_text
 
 
-def test_nodes_legend_describes_group_layout_without_hidden_statuses() -> None:
+def test_nodes_legend_describes_group_layout_without_status_markers() -> None:
     legend = legend_lines(0, False, True, 10)
     legend_text = "\n".join("".join(text for text, _style in row) for row in legend)
 
-    assert "hidden" not in legend_text
+    assert "… N more above/below" in legend_text
     assert "down/drained" not in legend_text
     assert "│/└  group members" in legend_text
     assert "D ■" not in legend_text
@@ -450,6 +618,90 @@ def test_capacity_bar_uses_non_overlapping_owned_other_and_free_parts() -> None:
         ("▆", "cpu"),
     ]
     assert sum(len(text) for text, _style in cells) == 6
+
+
+def test_usage_emphasis_colors_occupied_capacity_and_mutes_free_capacity() -> None:
+    row = capacity_bar(
+        "C",
+        free=1,
+        total=100,
+        stats="1/100",
+        width=6,
+        free_style="cpu",
+        mine_busy=1,
+        reserved_busy=1,
+        display_mode="usage",
+    )
+    cells = [(text, style) for text, style in row if text and set(text) == {"▆"}]
+
+    assert cells == [
+        ("▆", "mine"),
+        ("▆", "mine_reserved"),
+        ("▆▆▆", "cpu"),
+        ("▆", "busy"),
+    ]
+
+
+def test_node_display_mode_reverses_resource_emphasis_in_header_and_nodes() -> None:
+    cluster = Cluster(
+        name="GPU",
+        host="login",
+        focus="gpu",
+        nodes=[gpu_node("gpu01")],
+    )
+
+    capacity_header = cluster_header(cluster, "capacity")
+    usage_header = cluster_header(cluster, "usage")
+    capacity_body = cluster_body(cluster, colored=True, display_mode="capacity")
+    usage_body = cluster_body(cluster, colored=True, display_mode="usage")
+
+    def bar_styles(rows: list[list[tuple[str, str]]], label: str, symbol: str):
+        row = next(
+            row
+            for row in rows
+            if any(text.strip() == label for text, _style in row)
+            and symbol in "".join(text for text, _style in row)
+        )
+        return [style for text, style in row if text and set(text) == {symbol}]
+
+    assert bar_styles(capacity_header, "GPU", "▆") == ["busy", "free"]
+    assert bar_styles(usage_header, "GPU", "▆") == ["free", "busy"]
+    assert bar_styles(capacity_body, "G", "━")[:2] == ["busy", "free"]
+    assert bar_styles(usage_body, "G", "━")[:2] == ["free", "busy"]
+
+    capacity_text = "\n".join(
+        "".join(text for text, _style in row) for row in capacity_header
+    )
+    usage_text = "\n".join(
+        "".join(text for text, _style in row) for row in usage_header
+    )
+    assert "CAPACITY  free / total" in capacity_text
+    assert "GPU  " in capacity_text and "2/4" in capacity_text
+    assert "24/32" in capacity_text
+    assert "112G/128G" in capacity_text
+    assert "USAGE  used / total" in usage_text
+    assert "GPU  " in usage_text and "2/4" in usage_text
+    assert "8/32" in usage_text
+    assert "16G/128G" in usage_text
+
+
+def test_nodes_legend_describes_selected_emphasis() -> None:
+    capacity = legend_lines(0, False, True, 10, "capacity")
+    usage = legend_lines(0, False, True, 10, "usage")
+    capacity_text = "\n".join("".join(text for text, _style in row) for row in capacity)
+    usage_text = "\n".join("".join(text for text, _style in row) for row in usage)
+
+    assert "CPU free" in capacity_text
+    assert "other use / blocked" in capacity_text
+    assert "emphasis: capacity" in capacity_text
+    assert "CPU usage" in usage_text
+    assert "free capacity" in usage_text
+    assert "emphasis: usage" in usage_text
+    assert "totals ▆ + used/total" in usage_text
+    assert " U " not in usage_text
+    assert " R " not in usage_text
+    assert "X  another user's node" not in usage_text
+    assert "F  resource fully used" not in usage_text
 
 
 def test_node_capacity_bars_are_thin_while_cluster_totals_are_thick() -> None:

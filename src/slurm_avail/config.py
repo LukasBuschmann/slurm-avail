@@ -15,6 +15,7 @@ from .constants import VIEWS
 class DashboardSettings:
     tab_order: list[str] = field(default_factory=lambda: list(VIEWS))
     disabled_tabs: list[str] = field(default_factory=list)
+    node_display_mode: str = "usage"
     authenticate_on_startup: bool = True
     group_jobs_by_name: bool = True
     control_persist_seconds: int = 3600
@@ -79,7 +80,10 @@ BOOLEAN_SETTING_FIELDS = (
     ("authenticate_on_startup", "Startup authentication"),
     ("group_jobs_by_name", "Group jobs by name"),
 )
-SETTING_COUNT = len(SETTING_FIELDS) + len(BOOLEAN_SETTING_FIELDS)
+CHOICE_SETTING_FIELDS = (("node_display_mode", "Node emphasis", ("usage", "capacity")),)
+SETTING_COUNT = (
+    len(SETTING_FIELDS) + len(BOOLEAN_SETTING_FIELDS) + len(CHOICE_SETTING_FIELDS)
+)
 CLUSTER_OFFSET = SETTING_COUNT + len(VIEWS)
 SETTING_LIMITS = {
     key: (minimum, maximum) for key, _label, minimum, maximum in SETTING_FIELDS
@@ -112,6 +116,10 @@ def config_to_dict(config: AppConfig) -> dict[str, object]:
             **{
                 key: getattr(config.settings, key)
                 for key, _label in BOOLEAN_SETTING_FIELDS
+            },
+            **{
+                key: getattr(config.settings, key)
+                for key, _label, _choices in CHOICE_SETTING_FIELDS
             },
         },
         "clusters": [
@@ -219,6 +227,11 @@ def validate_config(config: AppConfig) -> None:
     for key, _label in BOOLEAN_SETTING_FIELDS:
         if not isinstance(getattr(config.settings, key), bool):
             raise ValueError(f"settings.{key} must be true or false")
+    for key, _label, choices in CHOICE_SETTING_FIELDS:
+        value = getattr(config.settings, key)
+        if not isinstance(value, str) or value not in choices:
+            allowed = ", ".join(choices)
+            raise ValueError(f"settings.{key} must be one of: {allowed}")
 
 
 def app_config_from_dict(data: object) -> AppConfig:
@@ -239,6 +252,9 @@ def app_config_from_dict(data: object) -> AppConfig:
         if key in settings_data:
             setattr(settings, key, settings_data[key])
     for key, _label in BOOLEAN_SETTING_FIELDS:
+        if key in settings_data:
+            setattr(settings, key, settings_data[key])
+    for key, _label, _choices in CHOICE_SETTING_FIELDS:
         if key in settings_data:
             setattr(settings, key, settings_data[key])
 
@@ -338,6 +354,8 @@ def save_config(config: AppConfig, path: Path) -> None:
         for key, _label in BOOLEAN_SETTING_FIELDS:
             value = str(getattr(config.settings, key)).lower()
             lines.append(f"{key} = {value}")
+        for key, _label, _choices in CHOICE_SETTING_FIELDS:
+            lines.append(f"{key} = {json.dumps(getattr(config.settings, key))}")
         for cluster in config.clusters:
             lines.extend(
                 [

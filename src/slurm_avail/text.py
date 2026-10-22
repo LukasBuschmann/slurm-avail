@@ -76,6 +76,7 @@ def capacity_bar(
     mine_busy: int = 0,
     reserved_busy: int = 0,
     thin: bool = False,
+    display_mode: str = "capacity",
 ) -> Line:
     """Draw non-overlapping owned, occupied, and free capacity left to right."""
     segments = capacity_segments(
@@ -87,6 +88,7 @@ def capacity_bar(
         mine_busy,
         reserved_busy,
         thin,
+        display_mode,
     )
     return line(
         (f"{label}  ", free_style),
@@ -104,6 +106,7 @@ def capacity_segments(
     mine_busy: int = 0,
     reserved_busy: int = 0,
     thin: bool = False,
+    display_mode: str = "capacity",
 ) -> Line:
     """Draw only the colored cells of a capacity bar."""
     free = min(max(0, free), max(0, total))
@@ -141,14 +144,20 @@ def capacity_segments(
                 slots[index] = 1
 
     mine_slots, reserved_slots, other_slots, free_slots = slots
+    other_style = busy_style
+    remaining_style = free_style
+    if display_mode == "usage":
+        remaining_style = "busy"
+        if busy_style == "busy":
+            other_style = free_style
     mine_symbol = reserved_symbol = other_symbol = free_symbol = "━"
     if not thin:
         mine_symbol = reserved_symbol = other_symbol = free_symbol = "▆"
     return line(
         (mine_symbol * mine_slots, "mine"),
         (reserved_symbol * reserved_slots, "mine_reserved"),
-        (other_symbol * other_slots, busy_style),
-        (free_symbol * free_slots, free_style),
+        (other_symbol * other_slots, other_style),
+        (free_symbol * free_slots, remaining_style),
     )
 
 

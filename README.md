@@ -28,7 +28,17 @@ the trailing minute, including failed attempts and retries.
 **Nodes** gives a live overview of all configured clusters. It summarizes free
 CPU, memory, and physical GPU capacity and then shows how those resources are
 distributed across individual nodes. Node states such as allocated, reserved,
-user-exclusive, drained, and down remain visible in the same view.
+user-exclusive, drained, and down remain visible in the same view. Nothing is
+selected when the view opens. Use `Up` or `Down` to highlight a hardware group,
+then press `Enter` to browse its nodes and inspect a selected node's full name
+and exact scheduler-reported GPU, CPU, and memory allocation below the columns.
+While browsing nodes, `Esc` returns the highlight to the hardware group. Press
+it again to clear the selection. Each group starts with up to five nodes. When
+a group is truncated, `… N more` rows report how many nodes lie above and below
+the visible slice. The scrollbar moves onto the open group's guide line. Spare
+terminal rows are shared evenly between the groups, and every cluster column
+keeps its own scroll position. A horizontal scrollbar appears when the cluster
+columns exceed the available width.
 
 **Filesystems** compares capacity and available space for the storage paths
 configured on each cluster.
@@ -236,6 +246,7 @@ TU Dresden/ZIH username.
 version = 1
 
 [settings]
+node_display_mode = "usage"
 authenticate_on_startup = true
 group_jobs_by_name = true
 control_persist_seconds = 3600
@@ -315,6 +326,13 @@ The `user` field is optional; when omitted, OpenSSH configuration determines
 the user. The Slurm path is also optional when `scontrol` and `squeue` are
 already available on the endpoint's `PATH`.
 
+`node_display_mode` controls the Nodes view and defaults to `"usage"`. Usage
+mode reports used/total resources in cluster summaries, colors occupied CPU,
+memory, and GPU capacity, and mutes the free portion. `"capacity"` reports
+free/total resources and colors free capacity. Your usage and reservations
+retain their own colors in both modes. You can switch modes from the Config
+tab.
+
 Set `remote_shell = "login"` when a cluster initializes Slurm in its Bash
 login profile. Direct mode uses the normal non-interactive OpenSSH command
 environment. The TU Dresden example uses login mode for Barnard because its
@@ -367,6 +385,10 @@ slurm-avail --config /path/to/config.toml
 | --- | --- |
 | `Tab` / `Shift+Tab` | Next / previous enabled view |
 | Arrow keys | Scroll or navigate |
+| `Up` / `Down` in Nodes | Highlight a hardware group, or a node while browsing one |
+| `Enter` in Nodes | Browse the highlighted group's nodes / return to groups |
+| `Esc` in Nodes | Return from node browsing to the hardware group, then clear the selection |
+| `Left` / `Right` in Nodes | Select a cluster and move the horizontal viewport |
 | `Page Up` / `Page Down` | Scroll by page |
 | `Home` / `End` | Jump to top or bottom |
 | `r` | Refresh now |

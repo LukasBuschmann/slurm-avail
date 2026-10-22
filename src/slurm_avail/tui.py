@@ -18,6 +18,7 @@ from .collect import (
 )
 from .config import (
     BOOLEAN_SETTING_FIELDS,
+    CHOICE_SETTING_FIELDS,
     CLUSTER_OFFSET,
     SETTING_COUNT,
     SETTING_FIELDS,
@@ -75,7 +76,10 @@ from .jobs_views import (
 )
 from .models import EstimateRequest, EstimateResult
 from .node_views import (
-    cluster_body,
+    architecture_detail_lines,
+    architecture_nodes,
+    cluster_architectures,
+    cluster_body_layout,
     cluster_header,
     filesystem_legend_lines,
     filesystem_table,
@@ -83,6 +87,7 @@ from .node_views import (
     legend_lines,
     login_legend_lines,
     login_table,
+    node_detail_lines,
 )
 from .output import placeholder_clusters
 from .processes import cancel_active_commands, reset_command_cancellation
@@ -98,6 +103,7 @@ from .usage_views import usage_legend_lines, usage_table
 
 CTRL_F = ord("f") & 0x1F
 LEFT_PADDING = 1
+ESCAPE_DELAY_MS = 25
 REPEATED_NAVIGATION_KEYS = frozenset(
     {
         curses.KEY_UP,
@@ -262,6 +268,26 @@ def panel_layout(screen_width: int) -> tuple[int, int, int]:
     return content_width, divider_x, legend_x
 
 
+def horizontal_scrollbar(
+    width: int,
+    viewport_width: int,
+    canvas_width: int,
+    offset: int,
+) -> Line:
+    """Build a horizontal viewport indicator for an overflowing canvas."""
+    if width <= 0 or canvas_width <= viewport_width:
+        return []
+    thumb_width = max(1, min(width, round(width * viewport_width / canvas_width)))
+    travel = width - thumb_width
+    max_offset = max(1, canvas_width - viewport_width)
+    thumb_start = round(travel * min(max(0, offset), max_offset) / max_offset)
+    return [
+        ("─" * thumb_start, "busy"),
+        ("━" * thumb_width, "cpu"),
+        ("─" * (width - thumb_start - thumb_width), "busy"),
+    ]
+
+
 def draw_fixed_legend(
     screen: curses.window,
     legend: list[Line],
@@ -417,6 +443,8 @@ def dashboard(
 ) -> None:
     screen.keypad(True)
     with contextlib.suppress(curses.error):
+        curses.set_escdelay(ESCAPE_DELAY_MS)
+    with contextlib.suppress(curses.error):
         curses.curs_set(0)
     screen.timeout(200)
     styles = init_colors()
@@ -446,6 +474,15 @@ def dashboard(
     visible_views = active_views(runtime_config.settings)
     active_view = initial_view if initial_view in visible_views else visible_views[0]
     live_views = set(visible_views) - {"config", "usage", "estimate"}
+    node_cluster_index = min(max(0, initial_cluster_index), len(clusters) - 1)
+    node_selected_names: dict[str, str] = {}
+    node_selected_architectures = {}
+    node_open_architecture = None
+    node_reveal_group_context = True
+    node_row_positions = []
+    node_architecture_positions = []
+    node_vertical_offsets: dict[str, int] = {}
+    node_group_window_starts = {}
     forecast_cluster_index = initial_cluster_index
     jobs_cluster_index = initial_jobs_scope_index
     usage = UsageHistory()
@@ -741,38 +778,241 @@ def dashboard(
             )
 
             if active_view == "nodes":
-                headers = [cluster_header(cluster) for cluster in clusters]
-                bodies = [cluster_body(cluster, colored=True) for cluster in clusters]
-                header_height = max(len(header) for header in headers)
-                max_body_height = max((len(body) for body in bodies), default=0)
-                body_height = max(1, viewport_height - header_height)
-                max_vertical = max(0, max_body_height - body_height)
-                vertical_offsets[active_view] = min(
-                    max(0, vertical_offsets[active_view]), max_vertical
+                node_display_mode = runtime_config.settings.node_display_mode
+                node_cluster_index = min(
+                    max(0, node_cluster_index),
+                    len(clusters) - 1,
                 )
+                selected_cluster = clusters[node_cluster_index]
+                architectures_by_cluster = [
+                    cluster_architectures(cluster) for cluster in clusters
+                ]
+                selected_architectures = []
+                for cluster, architectures in zip(
+                    clusters,
+                    architectures_by_cluster,
+                    strict=True,
+                ):
+                    remembered = node_selected_architectures.get(cluster.name)
+                    selected_architecture = (
+                        remembered if remembered in architectures else None
+                    )
+                    selected_architectures.append(selected_architecture)
+                    if remembered is not None and selected_architecture is None:
+                        node_selected_architectures.pop(cluster.name, None)
+                selected_architecture = selected_architectures[node_cluster_index]
+                if node_open_architecture != selected_architecture:
+                    node_open_architecture = None
 
+                selected_node = None
+                open_nodes = []
+                if node_open_architecture is not None:
+                    open_nodes = architecture_nodes(
+                        selected_cluster,
+                        node_open_architecture,
+                    )
+                    if open_nodes:
+                        selected_name = node_selected_names.get(selected_cluster.name)
+                        selected_node = next(
+                            (node for node in open_nodes if node.name == selected_name),
+                            open_nodes[0],
+                        )
+                        node_selected_names[selected_cluster.name] = selected_node.name
+                    else:
+                        node_open_architecture = None
+
+                headers = [
+                    cluster_header(cluster, node_display_mode) for cluster in clusters
+                ]
+                if selected_node is not None:
+                    details = node_detail_lines(selected_cluster, selected_node)
+                elif selected_architecture is not None:
+                    details = architecture_detail_lines(
+                        selected_cluster,
+                        selected_architecture,
+                    )
+                else:
+                    details = []
+                header_height = max(len(header) for header in headers)
                 cluster_display_width = CLUSTER_WIDTH
                 canvas_width = (
                     len(clusters) * cluster_display_width + (len(clusters) - 1) * GAP
                 )
-                max_horizontal = max(0, canvas_width - content_width)
-                horizontal_offsets[active_view] = min(
-                    max(0, horizontal_offsets[active_view]), max_horizontal
+                show_horizontal_scrollbar = canvas_width > content_width
+                horizontal_scrollbar_height = int(show_horizontal_scrollbar)
+                available_below_header = max(1, viewport_height - header_height)
+                detail_height = min(
+                    6 if details else 0,
+                    max(
+                        0,
+                        available_below_header - 1 - horizontal_scrollbar_height,
+                    ),
                 )
-                horizontal_offset = horizontal_offsets[active_view]
-                vertical_offset = vertical_offsets[active_view]
+                body_height = max(
+                    1,
+                    available_below_header
+                    - detail_height
+                    - horizontal_scrollbar_height,
+                )
+
+                body_layouts = []
+                for index, cluster in enumerate(clusters):
+                    active_column = index == node_cluster_index
+                    body, positions, architecture_positions, window_starts = (
+                        cluster_body_layout(
+                            cluster,
+                            colored=True,
+                            display_mode=node_display_mode,
+                            selected_node_name=(
+                                selected_node.name
+                                if active_column and selected_node is not None
+                                else None
+                            ),
+                            anchor_node_name=(
+                                selected_node.name
+                                if active_column and selected_node is not None
+                                else None
+                            ),
+                            selected_architecture=(
+                                selected_architectures[index]
+                                if active_column and node_open_architecture is None
+                                else None
+                            ),
+                            open_architecture=(
+                                node_open_architecture if active_column else None
+                            ),
+                            max_height=body_height,
+                            window_starts=node_group_window_starts.get(cluster.name),
+                        )
+                    )
+                    body_layouts.append((body, positions, architecture_positions))
+                    node_group_window_starts[cluster.name] = window_starts
+                bodies = [body for body, _positions, _architectures in body_layouts]
+                node_row_positions = [
+                    positions for _body, positions, _architectures in body_layouts
+                ]
+                node_architecture_positions = [
+                    positions for _body, _nodes, positions in body_layouts
+                ]
+
+                architecture_bounds_by_cluster = []
+                for body, positions in zip(
+                    bodies,
+                    node_architecture_positions,
+                    strict=True,
+                ):
+                    ordered = sorted(positions.items(), key=lambda item: item[1])
+                    bounds = {}
+                    for position_index, (architecture, start) in enumerate(ordered):
+                        end = (
+                            ordered[position_index + 1][1] - 2
+                            if position_index + 1 < len(ordered)
+                            else len(body) - 1
+                        )
+                        bounds[architecture] = (start, max(start, end))
+                    architecture_bounds_by_cluster.append(bounds)
+
+                cluster_vertical_offsets = []
+                for index, (cluster, body) in enumerate(
+                    zip(clusters, bodies, strict=True)
+                ):
+                    max_cluster_vertical = max(0, len(body) - body_height)
+                    cluster_vertical_offset = min(
+                        max(0, node_vertical_offsets.get(cluster.name, 0)),
+                        max_cluster_vertical,
+                    )
+                    if index == node_cluster_index:
+                        bounds = architecture_bounds_by_cluster[index].get(
+                            selected_architectures[index]
+                        )
+                        if (
+                            bounds is not None
+                            and bounds[1] - bounds[0] + 1 <= body_height
+                        ):
+                            group_start, group_end = bounds
+                            lowest_offset = max(0, group_end - body_height + 1)
+                            highest_offset = min(group_start, max_cluster_vertical)
+                            cluster_vertical_offset = min(
+                                max(cluster_vertical_offset, lowest_offset),
+                                highest_offset,
+                            )
+                        else:
+                            if selected_node is not None:
+                                node_position = node_row_positions[index].get(
+                                    selected_node.name
+                                )
+                                selected_row = (
+                                    node_position.row
+                                    if node_position is not None
+                                    else None
+                                )
+                            else:
+                                selected_row = bounds[0] if bounds is not None else None
+                            if selected_row is not None:
+                                if (
+                                    node_reveal_group_context
+                                    and bounds is not None
+                                    and bounds[0] < cluster_vertical_offset
+                                ):
+                                    cluster_vertical_offset = bounds[0]
+                                elif selected_row < cluster_vertical_offset:
+                                    cluster_vertical_offset = selected_row
+                                elif (
+                                    selected_row
+                                    >= cluster_vertical_offset + body_height
+                                ):
+                                    cluster_vertical_offset = (
+                                        selected_row - body_height + 1
+                                    )
+                    node_vertical_offsets[cluster.name] = cluster_vertical_offset
+                    cluster_vertical_offsets.append(cluster_vertical_offset)
+
+                max_vertical = max(
+                    (max(0, len(body) - body_height) for body in bodies),
+                    default=0,
+                )
+                vertical_offsets[active_view] = cluster_vertical_offsets[
+                    node_cluster_index
+                ]
+                node_reveal_group_context = False
+
+                max_horizontal = max(0, canvas_width - content_width)
+                horizontal_offset = min(
+                    max(0, horizontal_offsets[active_view]),
+                    max_horizontal,
+                )
+                selected_cluster_left = node_cluster_index * (
+                    cluster_display_width + GAP
+                )
+                selected_cluster_right = selected_cluster_left + cluster_display_width
+                if selected_cluster_left < horizontal_offset:
+                    horizontal_offset = selected_cluster_left
+                elif selected_cluster_right > horizontal_offset + content_width:
+                    horizontal_offset = selected_cluster_right - content_width
+                horizontal_offset = min(max(0, horizontal_offset), max_horizontal)
+                horizontal_offsets[active_view] = horizontal_offset
                 page_height = body_height
                 legend = legend_lines(
                     age_seconds=node_age_seconds,
                     refreshing=bool(refresh_futures),
                     colored=True,
                     refresh_seconds=runtime_config.settings.node_refresh_seconds,
+                    display_mode=node_display_mode,
+                    browsing_nodes=node_open_architecture is not None,
                 )
 
-                for index, (header, body) in enumerate(
-                    zip(headers, bodies, strict=True)
+                for index, (cluster, header, body) in enumerate(
+                    zip(clusters, headers, bodies, strict=True)
                 ):
                     x = index * (cluster_display_width + GAP)
+                    cluster_vertical_offset = cluster_vertical_offsets[index]
+                    browsing_column = (
+                        index == node_cluster_index
+                        and node_open_architecture is not None
+                    )
+                    body_line_width = (
+                        CLUSTER_WIDTH if browsing_column else CLUSTER_WIDTH - 1
+                    )
                     for row, header_line in enumerate(header):
                         y = content_y + row
                         if y >= screen_height:
@@ -781,14 +1021,14 @@ def dashboard(
                             screen,
                             y,
                             x,
-                            clipped_line(header_line, cluster_display_width),
+                            clipped_line(header_line, CLUSTER_WIDTH),
                             horizontal_offset,
                             content_width,
                             styles,
                         )
 
                     for viewport_row in range(body_height):
-                        body_index = vertical_offset + viewport_row
+                        body_index = cluster_vertical_offset + viewport_row
                         y = content_y + header_height + viewport_row
                         if y >= screen_height or body_index >= len(body):
                             break
@@ -796,15 +1036,138 @@ def dashboard(
                             screen,
                             y,
                             x,
-                            clipped_line(body[body_index], cluster_display_width),
+                            clipped_line(body[body_index], body_line_width),
                             horizontal_offset,
                             content_width,
                             styles,
                         )
 
+                    show_scrollbar = False
+                    visible_fraction = 1.0
+                    progress = 0.0
+                    scrollbar_start = 0
+                    scrollbar_height = body_height
+                    scrollbar_x = x + cluster_display_width - 1
+                    selected_scrollbar_row = None
+                    if browsing_column:
+                        architecture_options = architecture_nodes(
+                            cluster,
+                            node_open_architecture,
+                        )
+                        displayed_nodes = sum(
+                            node.name in node_row_positions[index]
+                            for node in architecture_options
+                        )
+                        show_scrollbar = len(architecture_options) > displayed_nodes
+                        if show_scrollbar and architecture_options:
+                            displayed_rows = [
+                                node_row_positions[index][node.name].row
+                                for node in architecture_options
+                                if node.name in node_row_positions[index]
+                            ]
+                            if displayed_rows:
+                                window_start = node_group_window_starts[
+                                    cluster.name
+                                ].get(node_open_architecture, 0)
+                                first_row = min(displayed_rows) - int(window_start > 0)
+                                last_row = max(displayed_rows) + int(
+                                    window_start + displayed_nodes
+                                    < len(architecture_options)
+                                )
+                                first_visible = max(
+                                    first_row,
+                                    cluster_vertical_offset,
+                                )
+                                last_visible = min(
+                                    last_row,
+                                    cluster_vertical_offset + body_height - 1,
+                                )
+                                scrollbar_start = (
+                                    first_visible - cluster_vertical_offset
+                                )
+                                scrollbar_height = max(
+                                    1,
+                                    last_visible - first_visible + 1,
+                                )
+                                scrollbar_x = x
+                                if selected_node is not None:
+                                    selected_position = node_row_positions[index].get(
+                                        selected_node.name
+                                    )
+                                    if selected_position is not None:
+                                        selected_scrollbar_row = (
+                                            selected_position.row
+                                            - cluster_vertical_offset
+                                        )
+                            visible_fraction = displayed_nodes / len(
+                                architecture_options
+                            )
+                            selected_index = next(
+                                (
+                                    node_index
+                                    for node_index, node in enumerate(
+                                        architecture_options
+                                    )
+                                    if selected_node is not None
+                                    and node.name == selected_node.name
+                                ),
+                                0,
+                            )
+                            progress = (
+                                selected_index / (len(architecture_options) - 1)
+                                if len(architecture_options) > 1
+                                else 0.0
+                            )
+                    elif len(body) > body_height:
+                        show_scrollbar = True
+                        visible_fraction = body_height / len(body)
+                        progress = cluster_vertical_offset / (len(body) - body_height)
+
+                    if body_height > 0 and show_scrollbar:
+                        thumb_height = max(
+                            1,
+                            min(
+                                scrollbar_height,
+                                round(scrollbar_height * visible_fraction),
+                            ),
+                        )
+                        thumb_start = round(
+                            (scrollbar_height - thumb_height) * progress
+                        )
+                        for scrollbar_row in range(scrollbar_height):
+                            viewport_scrollbar_row = scrollbar_start + scrollbar_row
+                            if (
+                                browsing_column
+                                and viewport_scrollbar_row == selected_scrollbar_row
+                            ):
+                                continue
+                            y = content_y + header_height + viewport_scrollbar_row
+                            if y >= screen_height:
+                                break
+                            in_thumb = (
+                                thumb_start
+                                <= scrollbar_row
+                                < thumb_start + thumb_height
+                            )
+                            draw_spans(
+                                screen,
+                                y,
+                                scrollbar_x,
+                                [
+                                    (
+                                        "█" if in_thumb else "│",
+                                        "cpu" if in_thumb else "busy",
+                                    )
+                                ],
+                                horizontal_offset,
+                                content_width,
+                                styles,
+                            )
+
                 for index in range(1, len(clusters)):
                     divider_x = index * cluster_display_width + (index - 1) * GAP + 1
-                    for y in range(content_y, screen_height):
+                    cluster_bottom_y = content_y + header_height + body_height
+                    for y in range(content_y, min(cluster_bottom_y, screen_height)):
                         draw_spans(
                             screen,
                             y,
@@ -814,6 +1177,49 @@ def dashboard(
                             content_width,
                             styles,
                         )
+
+                cluster_bottom_y = content_y + header_height + body_height
+                if show_horizontal_scrollbar and cluster_bottom_y < screen_height:
+                    draw_spans(
+                        screen,
+                        cluster_bottom_y,
+                        0,
+                        horizontal_scrollbar(
+                            content_width,
+                            content_width,
+                            canvas_width,
+                            horizontal_offset,
+                        ),
+                        0,
+                        content_width,
+                        styles,
+                    )
+
+                detail_y = cluster_bottom_y + horizontal_scrollbar_height
+                for detail_index, detail_row in enumerate(details[:detail_height]):
+                    if detail_y >= screen_height:
+                        break
+                    if detail_index == 0:
+                        draw_spans(
+                            screen,
+                            detail_y,
+                            0,
+                            [("─" * (fixed_divider_x + 1), "busy")],
+                            0,
+                            fixed_divider_x + 1,
+                            styles,
+                        )
+                    else:
+                        draw_spans(
+                            screen,
+                            detail_y,
+                            0,
+                            detail_row,
+                            0,
+                            content_width,
+                            styles,
+                        )
+                    detail_y += 1
 
                 draw_fixed_legend(
                     screen,
@@ -1490,6 +1896,272 @@ def dashboard(
                 jobs_filter_editing = False
                 if active_view == "jobs":
                     jobs_selection_changed = True
+                elif active_view == "nodes":
+                    node_selected_architectures.clear()
+                    node_selected_names.clear()
+                    node_open_architecture = None
+                    node_reveal_group_context = True
+            elif active_view == "nodes" and key in (
+                10,
+                13,
+                curses.KEY_ENTER,
+            ):
+                node_cluster_index = min(
+                    max(0, node_cluster_index),
+                    len(clusters) - 1,
+                )
+                selected_cluster = clusters[node_cluster_index]
+                selected_architecture = node_selected_architectures.get(
+                    selected_cluster.name
+                )
+                if node_open_architecture is None:
+                    node_options = (
+                        architecture_nodes(selected_cluster, selected_architecture)
+                        if selected_architecture is not None
+                        else []
+                    )
+                    if node_options:
+                        node_open_architecture = selected_architecture
+                        selected_name = node_selected_names.get(selected_cluster.name)
+                        if not any(node.name == selected_name for node in node_options):
+                            node_selected_names[selected_cluster.name] = node_options[
+                                0
+                            ].name
+                        node_reveal_group_context = True
+                else:
+                    node_open_architecture = None
+                    node_reveal_group_context = True
+            elif active_view == "nodes" and key == 27:
+                selected_cluster = clusters[node_cluster_index]
+                if node_open_architecture is not None:
+                    node_selected_architectures[selected_cluster.name] = (
+                        node_open_architecture
+                    )
+                    if node_cluster_index < len(node_architecture_positions):
+                        group_row = node_architecture_positions[node_cluster_index].get(
+                            node_open_architecture
+                        )
+                        if group_row is not None:
+                            node_vertical_offsets[selected_cluster.name] = group_row
+                    node_open_architecture = None
+                else:
+                    node_selected_architectures.pop(selected_cluster.name, None)
+                    node_selected_names.pop(selected_cluster.name, None)
+                node_reveal_group_context = True
+            elif active_view == "nodes" and key in (
+                curses.KEY_LEFT,
+                curses.KEY_RIGHT,
+            ):
+                direction = -1 if key == curses.KEY_LEFT else 1
+                for _step in range(key_repeat):
+                    source_cluster = clusters[node_cluster_index]
+                    source_architecture = node_selected_architectures.get(
+                        source_cluster.name
+                    )
+                    source_position = None
+                    if node_open_architecture is not None and node_cluster_index < len(
+                        node_row_positions
+                    ):
+                        source_name = node_selected_names.get(source_cluster.name)
+                        if source_name is not None:
+                            source_position = node_row_positions[
+                                node_cluster_index
+                            ].get(source_name)
+                    if (
+                        source_position is None
+                        and source_architecture is not None
+                        and node_cluster_index < len(node_architecture_positions)
+                    ):
+                        source_position = node_architecture_positions[
+                            node_cluster_index
+                        ].get(source_architecture)
+                    source_row = (
+                        source_position.row
+                        if hasattr(source_position, "row")
+                        else source_position
+                    )
+                    source_screen_row = (
+                        source_row
+                        - node_vertical_offsets.get(
+                            source_cluster.name,
+                            0,
+                        )
+                        if source_row is not None
+                        else None
+                    )
+                    candidate = node_cluster_index + direction
+                    while 0 <= candidate < len(clusters):
+                        target_positions = (
+                            node_architecture_positions[candidate]
+                            if candidate < len(node_architecture_positions)
+                            else {}
+                        )
+                        target_vertical_offset = node_vertical_offsets.get(
+                            clusters[candidate].name,
+                            0,
+                        )
+                        target_architectures = [
+                            architecture
+                            for architecture in architectures_by_cluster[candidate]
+                            if architecture in target_positions
+                            and 0
+                            <= target_positions[architecture] - target_vertical_offset
+                            < page_height
+                        ]
+                        if not target_architectures:
+                            target_architectures = [
+                                architecture
+                                for architecture in architectures_by_cluster[candidate]
+                                if architecture in target_positions
+                            ]
+                        if target_architectures:
+                            if source_screen_row is None:
+                                target_architecture = target_architectures[0]
+                            else:
+                                target_architecture = min(
+                                    target_architectures,
+                                    key=lambda architecture: (
+                                        abs(
+                                            target_positions[architecture]
+                                            - target_vertical_offset
+                                            - source_screen_row
+                                        ),
+                                        target_positions[architecture],
+                                    ),
+                                )
+                            node_selected_architectures[clusters[candidate].name] = (
+                                target_architecture
+                            )
+                            node_cluster_index = candidate
+                            node_open_architecture = None
+                            break
+                        candidate += direction
+                    else:
+                        break
+                node_reveal_group_context = False
+            elif active_view == "nodes" and key in (
+                curses.KEY_UP,
+                curses.KEY_DOWN,
+                curses.KEY_PPAGE,
+                curses.KEY_NPAGE,
+                curses.KEY_HOME,
+                curses.KEY_END,
+            ):
+                node_cluster_index = min(
+                    max(0, node_cluster_index),
+                    len(clusters) - 1,
+                )
+                selected_cluster = clusters[node_cluster_index]
+                node_reveal_group_context = key in (
+                    curses.KEY_UP,
+                    curses.KEY_PPAGE,
+                    curses.KEY_HOME,
+                )
+                if node_open_architecture is not None:
+                    node_options = architecture_nodes(
+                        selected_cluster,
+                        node_open_architecture,
+                    )
+                    if node_options:
+                        selected_name = node_selected_names.get(selected_cluster.name)
+                        selected_index = next(
+                            (
+                                index
+                                for index, node in enumerate(node_options)
+                                if node.name == selected_name
+                            ),
+                            0,
+                        )
+                        if key == curses.KEY_HOME:
+                            selected_index = 0
+                        elif key == curses.KEY_END:
+                            selected_index = len(node_options) - 1
+                        else:
+                            step = key_repeat
+                            if key in (curses.KEY_PPAGE, curses.KEY_NPAGE):
+                                step *= max(1, page_height - 1)
+                            if key in (curses.KEY_UP, curses.KEY_PPAGE):
+                                step = -step
+                            selected_index = min(
+                                max(0, selected_index + step),
+                                len(node_options) - 1,
+                            )
+                        node_selected_names[selected_cluster.name] = node_options[
+                            selected_index
+                        ].name
+                    else:
+                        node_open_architecture = None
+                else:
+                    architecture_options = cluster_architectures(selected_cluster)
+                    if architecture_options:
+                        selected_architecture = node_selected_architectures.get(
+                            selected_cluster.name
+                        )
+                        positions = (
+                            node_architecture_positions[node_cluster_index]
+                            if node_cluster_index < len(node_architecture_positions)
+                            else {}
+                        )
+                        offset = node_vertical_offsets.get(
+                            selected_cluster.name,
+                            0,
+                        )
+                        visible_count = sum(
+                            0 <= row - offset < page_height
+                            for row in positions.values()
+                        )
+                        page_step = max(1, visible_count - 1)
+                        if selected_architecture is None:
+                            if key == curses.KEY_HOME:
+                                selected_index = 0
+                            elif key == curses.KEY_END:
+                                selected_index = len(architecture_options) - 1
+                            elif key == curses.KEY_UP:
+                                selected_index = max(
+                                    0,
+                                    len(architecture_options) - key_repeat,
+                                )
+                            elif key == curses.KEY_PPAGE:
+                                selected_index = max(
+                                    0,
+                                    len(architecture_options)
+                                    - 1
+                                    - (key_repeat - 1) * page_step,
+                                )
+                            elif key == curses.KEY_NPAGE:
+                                selected_index = min(
+                                    len(architecture_options) - 1,
+                                    (key_repeat - 1) * page_step,
+                                )
+                            else:
+                                selected_index = min(
+                                    len(architecture_options) - 1,
+                                    key_repeat - 1,
+                                )
+                        else:
+                            selected_index = architecture_options.index(
+                                selected_architecture
+                            )
+                            if key == curses.KEY_HOME:
+                                selected_index = 0
+                            elif key == curses.KEY_END:
+                                selected_index = len(architecture_options) - 1
+                            else:
+                                step = key_repeat
+                                if key in (
+                                    curses.KEY_PPAGE,
+                                    curses.KEY_NPAGE,
+                                ):
+                                    step *= page_step
+                                if key in (curses.KEY_UP, curses.KEY_PPAGE):
+                                    step = -step
+                                selected_index = min(
+                                    max(0, selected_index + step),
+                                    len(architecture_options) - 1,
+                                )
+                        node_selected_architectures[selected_cluster.name] = (
+                            architecture_options[selected_index]
+                        )
             elif active_view == "usage" and key in (
                 ord("+"),
                 ord("="),
@@ -1924,7 +2596,9 @@ def dashboard(
             elif (
                 active_view == "config"
                 and config_editing_cluster is None
-                and len(SETTING_FIELDS) <= config_selection < SETTING_COUNT
+                and len(SETTING_FIELDS)
+                <= config_selection
+                < len(SETTING_FIELDS) + len(BOOLEAN_SETTING_FIELDS)
                 and key
                 in (
                     curses.KEY_LEFT,
@@ -1944,6 +2618,37 @@ def dashboard(
                     value = True
                 else:
                     value = not current
+                if value != current:
+                    setattr(editable_config.settings, key_name, value)
+                    config_dirty = True
+                    config_message = f"Changed {label}; press s to apply"
+            elif (
+                active_view == "config"
+                and config_editing_cluster is None
+                and len(SETTING_FIELDS) + len(BOOLEAN_SETTING_FIELDS)
+                <= config_selection
+                < SETTING_COUNT
+                and key
+                in (
+                    curses.KEY_LEFT,
+                    curses.KEY_RIGHT,
+                    ord(" "),
+                    10,
+                    13,
+                    curses.KEY_ENTER,
+                )
+            ):
+                choice_index = (
+                    config_selection - len(SETTING_FIELDS) - len(BOOLEAN_SETTING_FIELDS)
+                )
+                key_name, label, choices = CHOICE_SETTING_FIELDS[choice_index]
+                current = getattr(editable_config.settings, key_name)
+                try:
+                    current_index = choices.index(current)
+                except ValueError:
+                    current_index = 0
+                direction = -1 if key == curses.KEY_LEFT else 1
+                value = choices[(current_index + direction) % len(choices)]
                 if value != current:
                     setattr(editable_config.settings, key_name, value)
                     config_dirty = True
@@ -2236,6 +2941,13 @@ def dashboard(
                         runtime_config,
                         user_override,
                     )
+                    node_cluster_index = min(node_cluster_index, len(clusters) - 1)
+                    node_selected_names.clear()
+                    node_selected_architectures.clear()
+                    node_open_architecture = None
+                    node_vertical_offsets.clear()
+                    node_group_window_starts.clear()
+                    node_reveal_group_context = True
                     estimate_generation += 1
                     for future in estimate_futures:
                         future.cancel()
@@ -2295,6 +3007,13 @@ def dashboard(
                         runtime_config,
                         user_override,
                     )
+                    node_cluster_index = min(node_cluster_index, len(clusters) - 1)
+                    node_selected_names.clear()
+                    node_selected_architectures.clear()
+                    node_open_architecture = None
+                    node_vertical_offsets.clear()
+                    node_group_window_starts.clear()
+                    node_reveal_group_context = True
                     estimate_generation += 1
                     for future in estimate_futures:
                         future.cancel()

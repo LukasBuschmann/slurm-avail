@@ -9,6 +9,7 @@ from pathlib import Path
 
 from .config import (
     BOOLEAN_SETTING_FIELDS,
+    CHOICE_SETTING_FIELDS,
     CLUSTER_OFFSET,
     SETTING_COUNT,
     SETTING_FIELDS,
@@ -223,6 +224,18 @@ def config_table(
         choices = "[ON]  off" if value else "on  [OFF]"
         style = "selected" if selected else "normal"
         body.append(line((f"  {label:<28} {choices}", style)))
+    choice_offset = boolean_offset + len(BOOLEAN_SETTING_FIELDS)
+    for offset, (key, label, choices) in enumerate(CHOICE_SETTING_FIELDS):
+        index = choice_offset + offset
+        selected = selection == index
+        if selected:
+            selected_body_index = len(body)
+        current = getattr(config.settings, key)
+        values = "  ".join(
+            f"[{choice.upper()}]" if choice == current else choice for choice in choices
+        )
+        style = "selected" if selected else "normal"
+        body.append(line((f"  {label:<28} {values}", style)))
 
     body.extend([plain(""), line(("TABS · display order", "title"))])
     for offset, tab in enumerate(config.settings.tab_order):

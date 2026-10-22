@@ -20,7 +20,7 @@ from slurm_avail.config import (
 )
 from slurm_avail.config_views import config_table
 from slurm_avail.constants import VIEWS
-from slurm_avail.models import Cluster, UserJob
+from slurm_avail.models import Cluster, Node, UserJob
 from slurm_avail.text import tab_line
 from slurm_avail.tui import dashboard
 from slurm_avail.usage import UsageHistory, UsageResult
@@ -200,6 +200,19 @@ def test_tabs_can_be_reenabled_from_config(tui, tmp_path):
     assert active[-1] == "nodes"
 
 
+def test_node_display_mode_can_be_changed_from_default_and_saved(tui, tmp_path):
+    keys = [curses.KEY_DOWN] * (SETTING_COUNT - 1) + [
+        curses.KEY_RIGHT,
+        ord("s"),
+        ord("q"),
+    ]
+    path = tmp_path / "config.toml"
+
+    dashboard(Screen(keys), "config", local_config(), path, None, 0, 0)
+
+    assert load_config(path).settings.node_display_mode == "capacity"
+
+
 def test_config_only_navigation_does_not_start_live_polling(tui, tmp_path):
     config = local_config()
     config.settings.disabled_tabs = list(VIEWS[:-1])
@@ -226,6 +239,486 @@ def test_dashboard_shows_request_count_in_bottom_right(tui, monkeypatch, tmp_pat
     lines = screen.frames[-1].splitlines()
     assert "REQUESTS / MIN" in lines[-2]
     assert lines[-1].rstrip().endswith("17")
+
+
+def test_dashboard_recognizes_escape_without_waiting_for_another_key(
+    tui, monkeypatch, tmp_path
+):
+    escape_delays = []
+    monkeypatch.setattr(
+        "slurm_avail.tui.curses.set_escdelay",
+        escape_delays.append,
+    )
+
+    dashboard(
+        Screen([ord("q")]),
+        "nodes",
+        local_config(),
+        tmp_path / "config.toml",
+        None,
+        0,
+        0,
+    )
+
+    assert escape_delays == [25]
+
+
+def test_nodes_cursor_moves_and_shows_exact_node_details(tui, monkeypatch, tmp_path):
+    def node(name: str, cpu_alloc: int, mem_alloc: int) -> Node:
+        return Node(
+            name=name,
+            state="MIXED",
+            status="available",
+            owner=None,
+            unavailable=False,
+            gpu_total=0,
+            gpu_alloc=0,
+            gpu_busy=0,
+            cpu_alloc=cpu_alloc,
+            cpu_total=32,
+            mem_alloc=mem_alloc,
+            mem_total=128 * 1024,
+        )
+
+    cluster = Cluster(
+        name="LOCAL",
+        host="localhost",
+        focus="cpu",
+        nodes=[
+            node("compute-node-one-full-name", 8, 16 * 1024),
+            node("compute-node-two-full-name", 12, 24 * 1024),
+        ],
+    )
+    monkeypatch.setattr(
+        "slurm_avail.tui.placeholder_clusters",
+        lambda *_args, **_kwargs: [cluster],
+    )
+    screen = Screen([curses.KEY_DOWN, curses.KEY_ENTER, curses.KEY_DOWN, ord("q")])
+
+    dashboard(
+        screen,
+        "nodes",
+        local_config(),
+        tmp_path / "config.toml",
+        None,
+        0,
+        0,
+    )
+
+    assert "ARCHITECTURE  CPU" not in screen.frames[0]
+    assert "NODE  " not in screen.frames[0]
+    assert "ARCHITECTURE  CPU" in screen.frames[1]
+    assert "NODE  compute-node-one-full-name" in screen.frames[2]
+    assert "NODE  compute-node-two-full-name" in screen.frames[-1]
+    assert "12 allocated · 20 free · 32 total" in screen.frames[-1]
+    assert (
+        "24,576 MiB allocated · 106,496 MiB free · 131,072 MiB total"
+        in screen.frames[-1]
+    )
+
+
+def test_nodes_escape_returns_to_architecture_then_clears_selection(
+    tui, monkeypatch, tmp_path
+):
+    cluster = Cluster(
+        name="LOCAL",
+        host="localhost",
+        focus="cpu",
+        nodes=[
+            Node(
+                name="compute-node",
+                state="IDLE",
+                status="available",
+                owner=None,
+                unavailable=False,
+                gpu_total=0,
+                gpu_alloc=0,
+                gpu_busy=0,
+                cpu_alloc=0,
+                cpu_total=32,
+                mem_alloc=0,
+                mem_total=128 * 1024,
+            )
+        ],
+    )
+    monkeypatch.setattr(
+        "slurm_avail.tui.placeholder_clusters",
+        lambda *_args, **_kwargs: [cluster],
+    )
+    screen = Screen([curses.KEY_DOWN, curses.KEY_ENTER, 27, 27, ord("q")])
+
+    dashboard(
+        screen,
+        "nodes",
+        local_config(),
+        tmp_path / "config.toml",
+        None,
+        0,
+        0,
+    )
+
+    assert "ARCHITECTURE  CPU" not in screen.frames[0]
+    assert "ARCHITECTURE  CPU" in screen.frames[1]
+    assert "ARCHITECTURE  CPU" not in screen.frames[2]
+    assert "NODE  compute-node" in screen.frames[2]
+    assert "ARCHITECTURE  CPU" in screen.frames[3]
+    assert "NODE  compute-node" not in screen.frames[3]
+    assert "ARCHITECTURE  CPU" not in screen.frames[-1]
+
+
+def test_nodes_escape_immediately_restores_a_scrolled_architecture(
+    tui, monkeypatch, tmp_path
+):
+    nodes = [
+        Node(
+            name="large-node",
+            state="IDLE",
+            status="available",
+            owner=None,
+            unavailable=False,
+            gpu_total=0,
+            gpu_alloc=0,
+            gpu_busy=0,
+            cpu_alloc=0,
+            cpu_total=64,
+            mem_alloc=0,
+            mem_total=128 * 1024,
+        ),
+        *[
+            Node(
+                name=f"small-node-{index:02}",
+                state="IDLE",
+                status="available",
+                owner=None,
+                unavailable=False,
+                gpu_total=0,
+                gpu_alloc=0,
+                gpu_busy=0,
+                cpu_alloc=0,
+                cpu_total=32,
+                mem_alloc=0,
+                mem_total=64 * 1024,
+            )
+            for index in range(30)
+        ],
+    ]
+    cluster = Cluster(name="LOCAL", host="localhost", focus="cpu", nodes=nodes)
+    monkeypatch.setattr(
+        "slurm_avail.tui.placeholder_clusters",
+        lambda *_args, **_kwargs: [cluster],
+    )
+    screen = Screen(
+        [curses.KEY_DOWN] * 2
+        + [curses.KEY_ENTER]
+        + [curses.KEY_DOWN] * 25
+        + [27, ord("q")]
+    )
+
+    dashboard(
+        screen,
+        "nodes",
+        local_config(),
+        tmp_path / "config.toml",
+        None,
+        0,
+        0,
+    )
+
+    restored = screen.frames[-1]
+    assert "ARCHITECTURE  CPU" in restored
+    assert "per node  32 CPU · 64G RAM" in restored
+    assert "NODE  " not in restored
+    assert "32 CPU · 64G RAM" in "\n".join(restored.splitlines()[11:20])
+
+
+def test_nodes_cursor_keeps_same_screen_row_when_switching_clusters(
+    tui, monkeypatch, tmp_path
+):
+    def nodes(prefix: str, cores: tuple[int, ...]) -> list[Node]:
+        return [
+            Node(
+                name=f"{prefix}-{cpu_total}",
+                state="IDLE",
+                status="available",
+                owner=None,
+                unavailable=False,
+                gpu_total=0,
+                gpu_alloc=0,
+                gpu_busy=0,
+                cpu_alloc=0,
+                cpu_total=cpu_total,
+                mem_alloc=0,
+                mem_total=128 * 1024,
+            )
+            for cpu_total in cores
+        ]
+
+    clusters = [
+        Cluster(
+            name="FIRST",
+            host="local",
+            focus="cpu",
+            nodes=nodes("first", (96, 64, 32)),
+        ),
+        Cluster(
+            name="SECOND",
+            host="local",
+            focus="cpu",
+            nodes=nodes("second", (128, 64, 16)),
+        ),
+    ]
+    config = AppConfig(
+        clusters=[
+            ClusterConfig(name="FIRST", mode="local"),
+            ClusterConfig(name="SECOND", mode="local"),
+        ]
+    )
+    monkeypatch.setattr(
+        "slurm_avail.tui.placeholder_clusters",
+        lambda *_args, **_kwargs: clusters,
+    )
+    screen = Screen(
+        [
+            curses.KEY_DOWN,
+            curses.KEY_DOWN,
+            curses.KEY_RIGHT,
+            curses.KEY_ENTER,
+            ord("q"),
+        ]
+    )
+
+    dashboard(
+        screen,
+        "nodes",
+        config,
+        tmp_path / "config.toml",
+        None,
+        0,
+        0,
+    )
+
+    assert "NODE  second-64" in screen.frames[-1]
+
+
+def test_nodes_cursor_reveals_first_group_heading_after_scrolling_back_up(
+    tui, monkeypatch, tmp_path
+):
+    nodes = [
+        Node(
+            name=f"node-{index:02}",
+            state="IDLE",
+            status="available",
+            owner=None,
+            unavailable=False,
+            gpu_total=0,
+            gpu_alloc=0,
+            gpu_busy=0,
+            cpu_alloc=0,
+            cpu_total=256 - 16 * index,
+            mem_alloc=0,
+            mem_total=128 * 1024,
+        )
+        for index in range(12)
+    ]
+    cluster = Cluster(name="LOCAL", host="local", focus="cpu", nodes=nodes)
+    monkeypatch.setattr(
+        "slurm_avail.tui.placeholder_clusters",
+        lambda *_args, **_kwargs: [cluster],
+    )
+    screen = Screen([curses.KEY_END, curses.KEY_HOME, ord("q")])
+
+    dashboard(
+        screen,
+        "nodes",
+        local_config(),
+        tmp_path / "config.toml",
+        None,
+        0,
+        0,
+    )
+
+    assert "256 CPU · 128G RAM" in screen.frames[-1]
+    assert "ARCHITECTURE  CPU" in screen.frames[-1]
+    assert "per node  256 CPU" in screen.frames[-1]
+    assert "80 CPU · 128G RAM" in screen.frames[1]
+    assert "node-11" in screen.frames[1]
+    body_rows = screen.frames[-1].splitlines()[11:34]
+    assert all(row[28] in "│█" for row in body_rows)
+
+
+def test_node_columns_keep_independent_slices_and_draw_scrollbars(
+    tui, monkeypatch, tmp_path
+):
+    def nodes(prefix: str, second_architecture: bool = False) -> list[Node]:
+        result = [
+            Node(
+                name=f"{prefix}{index:02}",
+                state="IDLE",
+                status="available",
+                owner=None,
+                unavailable=False,
+                gpu_total=0,
+                gpu_alloc=0,
+                gpu_busy=0,
+                cpu_alloc=0,
+                cpu_total=32,
+                mem_alloc=0,
+                mem_total=128 * 1024,
+            )
+            for index in range(30)
+        ]
+        if second_architecture:
+            result.extend(
+                Node(
+                    name=f"{prefix}-small-{index}",
+                    state="IDLE",
+                    status="available",
+                    owner=None,
+                    unavailable=False,
+                    gpu_total=0,
+                    gpu_alloc=0,
+                    gpu_busy=0,
+                    cpu_alloc=0,
+                    cpu_total=16,
+                    mem_alloc=0,
+                    mem_total=64 * 1024,
+                )
+                for index in range(2)
+            )
+        return result
+
+    clusters = [
+        Cluster(
+            name="FIRST",
+            host="local",
+            focus="cpu",
+            nodes=nodes("A", second_architecture=True),
+        ),
+        Cluster(name="SECOND", host="local", focus="cpu", nodes=nodes("B")),
+    ]
+    config = AppConfig(
+        clusters=[
+            ClusterConfig(name="FIRST", mode="local"),
+            ClusterConfig(name="SECOND", mode="local"),
+        ]
+    )
+    monkeypatch.setattr(
+        "slurm_avail.tui.placeholder_clusters",
+        lambda *_args, **_kwargs: clusters,
+    )
+    screen = Screen(
+        [curses.KEY_DOWN, curses.KEY_ENTER] + [curses.KEY_DOWN] * 25 + [ord("q")]
+    )
+
+    dashboard(
+        screen,
+        "nodes",
+        config,
+        tmp_path / "config.toml",
+        None,
+        0,
+        0,
+    )
+
+    frame = screen.frames[-1]
+    initial_body_rows = screen.frames[0].splitlines()[11:34]
+    opened_body_rows = screen.frames[2].splitlines()[11:34]
+    assert all(row[28] == " " for row in initial_body_rows)
+    assert all(row[59] == " " for row in initial_body_rows)
+    assert opened_body_rows[2][1] == "│"
+    assert all(row[1] in "│█" for row in opened_body_rows[3:18])
+    assert "A12" in frame and "A25" in frame
+    assert "B00" in frame and "B19" in frame
+    assert "B20" not in frame
+    assert "… 12 more" in frame
+    assert "… 4 more" in frame
+    rows = frame.splitlines()
+    body_rows = rows[11:34]
+    assert all(row[1] in "│█" for row in body_rows[2:16])
+    assert body_rows[16][1] == "│"
+    assert body_rows[17][1] in "│█"
+    assert all(row[59] == " " for row in body_rows)
+
+
+def test_nodes_horizontal_scrollbar_tracks_cluster_navigation_and_hides_when_fit(
+    tui, monkeypatch, tmp_path
+):
+    def cluster(name: str) -> Cluster:
+        return Cluster(
+            name=name,
+            host="localhost",
+            focus="cpu",
+            nodes=[
+                Node(
+                    name=f"{name.lower()}-node",
+                    state="IDLE",
+                    status="available",
+                    owner=None,
+                    unavailable=False,
+                    gpu_total=0,
+                    gpu_alloc=0,
+                    gpu_busy=0,
+                    cpu_alloc=0,
+                    cpu_total=32,
+                    mem_alloc=0,
+                    mem_total=128 * 1024,
+                )
+            ],
+        )
+
+    clusters = [cluster(f"CLUSTER-{index}") for index in range(4)]
+    config = AppConfig(
+        clusters=[ClusterConfig(name=item.name, mode="local") for item in clusters]
+    )
+    monkeypatch.setattr(
+        "slurm_avail.tui.placeholder_clusters",
+        lambda *_args, **_kwargs: clusters,
+    )
+    overflow_screen = Screen([curses.KEY_RIGHT] * 3 + [ord("q")])
+
+    dashboard(
+        overflow_screen,
+        "nodes",
+        config,
+        tmp_path / "config.toml",
+        None,
+        0,
+        0,
+    )
+
+    def scrollbar_row(frame: str) -> str:
+        return next(row[:101] for row in frame.splitlines() if "━" * 50 in row[:101])
+
+    initial_bar = scrollbar_row(overflow_screen.frames[0])
+    final_bar = scrollbar_row(overflow_screen.frames[-1])
+    assert "━" in initial_bar and "─" in initial_bar
+    assert initial_bar.index("━") < final_bar.index("━")
+
+    fitting_clusters = clusters[:3]
+    fitting_config = AppConfig(
+        clusters=[
+            ClusterConfig(name=item.name, mode="local") for item in fitting_clusters
+        ]
+    )
+    monkeypatch.setattr(
+        "slurm_avail.tui.placeholder_clusters",
+        lambda *_args, **_kwargs: fitting_clusters,
+    )
+    fitting_screen = Screen([ord("q")])
+
+    dashboard(
+        fitting_screen,
+        "nodes",
+        fitting_config,
+        tmp_path / "config.toml",
+        None,
+        0,
+        0,
+    )
+
+    assert not any(
+        "━" * 50 in row[:101] for row in fitting_screen.frames[-1].splitlines()
+    )
 
 
 def test_jobs_ctrl_f_filters_live_without_blocking_navigation(

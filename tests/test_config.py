@@ -18,6 +18,7 @@ def test_config_round_trip_and_private_permissions(tmp_path: Path) -> None:
     path = tmp_path / "nested" / "config.toml"
     expected = AppConfig(
         settings=DashboardSettings(
+            node_display_mode="usage",
             authenticate_on_startup=False,
             group_jobs_by_name=False,
             control_persist_seconds=900,
@@ -47,6 +48,7 @@ def test_config_round_trip_and_private_permissions(tmp_path: Path) -> None:
     assert 'remote_shell = "login"' in config_text
     assert "authenticate_on_startup = false" in config_text
     assert "group_jobs_by_name = false" in config_text
+    assert 'node_display_mode = "usage"' in config_text
     settings_section = config_text.split("[[clusters]]", 1)[0]
     cluster_section = config_text.split("[[clusters]]", 1)[1]
     assert "control_persist_seconds = 900" in settings_section
@@ -175,6 +177,7 @@ mode = "local"
 
     assert config.settings.authenticate_on_startup is True
     assert config.settings.group_jobs_by_name is True
+    assert config.settings.node_display_mode == "usage"
 
 
 def test_startup_authentication_setting_must_be_boolean(tmp_path: Path) -> None:
@@ -194,4 +197,24 @@ mode = "local"
     )
 
     with pytest.raises(ValueError, match="must be true or false"):
+        load_config(path, create=False)
+
+
+def test_node_display_mode_must_be_capacity_or_usage(tmp_path: Path) -> None:
+    path = tmp_path / "config.toml"
+    path.write_text(
+        """
+version = 1
+
+[settings]
+node_display_mode = "temperature"
+
+[[clusters]]
+name = "LOCAL"
+mode = "local"
+""",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="node_display_mode must be one of"):
         load_config(path, create=False)

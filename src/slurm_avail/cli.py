@@ -36,7 +36,7 @@ def package_version() -> str:
     try:
         return version("slurm-avail")
     except PackageNotFoundError:
-        return "0.6.0.dev0"
+        return "0.7.0.dev0"
 
 
 @contextlib.contextmanager

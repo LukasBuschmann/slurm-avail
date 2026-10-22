@@ -2,7 +2,12 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from slurm_avail.config import SETTING_FIELDS, AppConfig, ClusterConfig
+from slurm_avail.config import (
+    BOOLEAN_SETTING_FIELDS,
+    SETTING_FIELDS,
+    AppConfig,
+    ClusterConfig,
+)
 from slurm_avail.config_views import (
     CLUSTER_FIELDS,
     ClusterField,
@@ -127,3 +132,20 @@ def test_global_boolean_setting_renders_as_a_choice() -> None:
     selected_text = row_text(body[selected_body_index])
     assert "Startup authentication" in selected_text
     assert "[ON]  off" in selected_text
+
+
+def test_node_display_mode_renders_as_a_choice() -> None:
+    config = AppConfig(clusters=[ClusterConfig(name="LOCAL", mode="local")])
+    selection = len(SETTING_FIELDS) + len(BOOLEAN_SETTING_FIELDS)
+
+    _headers, body, selected_body_index = config_table(
+        config,
+        Path("config.toml"),
+        selection=selection,
+        dirty=False,
+        message="",
+    )
+
+    selected_text = row_text(body[selected_body_index])
+    assert "Node emphasis" in selected_text
+    assert "[USAGE]  capacity" in selected_text

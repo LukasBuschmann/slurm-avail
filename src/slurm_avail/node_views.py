@@ -63,6 +63,14 @@ class NodeArchitecture:
     gpu_type: str
 
 
+@dataclass(frozen=True)
+class NodeRowPosition:
+    """Location of a selectable node and its architecture heading."""
+
+    row: int
+    group_start: int
+
+
 def node_resource_capacity(
     node: Node,
     usage: UserNodeUsage,
@@ -277,7 +285,10 @@ def login_table(clusters: list[Cluster]) -> list[Line]:
     return lines
 
 
-def cluster_header(cluster: Cluster) -> list[Line]:
+def cluster_header(
+    cluster: Cluster,
+    display_mode: str = "usage",
+) -> list[Line]:
     loading_frame = (
         LOADING_FRAMES[int(time.monotonic() * 8) % len(LOADING_FRAMES)]
         if cluster.loading
@@ -324,7 +335,19 @@ def cluster_header(cluster: Cluster) -> list[Line]:
     cpu = cluster_resource_capacity(cluster, user_usage, "cpu")
     memory = cluster_resource_capacity(cluster, user_usage, "memory")
     gpu = cluster_resource_capacity(cluster, user_usage, "gpu")
-    header.append(line(("CAPACITY", "title"), ("  free / total", "busy")))
+    usage_focused = display_mode == "usage"
+    summary_label = "used" if usage_focused else "free"
+    summary_title = "USAGE" if usage_focused else "CAPACITY"
+
+    def displayed_amount(capacity: ResourceCapacity) -> int:
+        return capacity.total - capacity.free if usage_focused else capacity.free
+
+    cpu_amount = displayed_amount(cpu)
+    memory_amount = displayed_amount(memory)
+    gpu_amount = displayed_amount(gpu)
+    header.append(
+        line((summary_title, "title"), (f"  {summary_label} / total", "busy"))
+    )
     if cluster.has_gpus:
         header.extend(
             [
@@ -332,31 +355,34 @@ def cluster_header(cluster: Cluster) -> list[Line]:
                     "GPU",
                     gpu.free,
                     gpu.total,
-                    f"{gpu.free}/{gpu.total}",
+                    f"{gpu_amount}/{gpu.total}",
                     8,
                     "free",
                     mine_busy=gpu.mine,
                     reserved_busy=gpu.mine_reserved,
+                    display_mode=display_mode,
                 ),
                 capacity_bar(
                     "CPU",
                     cpu.free,
                     cpu.total,
-                    f"{compact_count(cpu.free)}/{compact_count(cpu.total)}",
+                    f"{compact_count(cpu_amount)}/{compact_count(cpu.total)}",
                     8,
                     "cpu",
                     mine_busy=cpu.mine,
                     reserved_busy=cpu.mine_reserved,
+                    display_mode=display_mode,
                 ),
                 capacity_bar(
                     "RAM",
                     memory.free,
                     memory.total,
-                    f"{compact_memory(memory.free)}/{compact_memory(memory.total)}",
+                    f"{compact_memory(memory_amount)}/{compact_memory(memory.total)}",
                     8,
                     "memory",
                     mine_busy=memory.mine,
                     reserved_busy=memory.mine_reserved,
+                    display_mode=display_mode,
                 ),
             ]
         )
@@ -367,21 +393,23 @@ def cluster_header(cluster: Cluster) -> list[Line]:
                     "CPU",
                     cpu.free,
                     cpu.total,
-                    f"{compact_count(cpu.free)}/{compact_count(cpu.total)}",
+                    f"{compact_count(cpu_amount)}/{compact_count(cpu.total)}",
                     8,
                     "cpu",
                     mine_busy=cpu.mine,
                     reserved_busy=cpu.mine_reserved,
+                    display_mode=display_mode,
                 ),
                 capacity_bar(
                     "RAM",
                     memory.free,
                     memory.total,
-                    f"{compact_memory(memory.free)}/{compact_memory(memory.total)}",
+                    f"{compact_memory(memory_amount)}/{compact_memory(memory.total)}",
                     8,
                     "memory",
                     mine_busy=memory.mine,
                     reserved_busy=memory.mine_reserved,
+                    display_mode=display_mode,
                 ),
                 plain(""),
             ]
@@ -396,12 +424,6 @@ def cluster_header(cluster: Cluster) -> list[Line]:
     return header
 
 
-STATUS_MARKERS = {
-    "drained": "D",
-    "reserved": "R",
-    "exclusive": "X",
-    "full": "F",
-}
 STATUS_STYLES = {
     "drained": "drained",
     "reserved": "reserved",
@@ -419,18 +441,16 @@ def node_label(
     usage: UserNodeUsage | None = None,
 ) -> tuple[str, str]:
     usage = usage or UserNodeUsage()
-    marker = STATUS_MARKERS.get(node.status, "")
     style = STATUS_STYLES.get(node.status, "normal")
-    if usage.reserved:
-        if "R" not in marker:
-            marker += "R"
-        if node.status != "drained":
-            style = "mine_reserved"
-    if usage.running:
-        marker += "U"
-        if node.status not in ("drained", "reserved") and not usage.reserved:
-            style = "mine"
-    return f"{node.name} {marker}".rstrip(), style
+    if usage.reserved and node.status != "drained":
+        style = "mine_reserved"
+    if (
+        usage.running
+        and node.status not in ("drained", "reserved")
+        and not usage.reserved
+    ):
+        style = "mine"
+    return node.name, style
 
 
 def clipped_node_label(
@@ -439,16 +459,12 @@ def clipped_node_label(
     width: int,
     display_name: str | None = None,
 ) -> tuple[str, str]:
-    """Fit a node name at the end of a meter row without hiding its markers."""
-    full_label, style = node_label(node, usage)
-    marker = full_label[len(node.name) :].strip()
-    marker_width = len(marker) + 1 if marker else 0
-    name_width = max(1, width - marker_width)
+    """Fit a colored node name at the end of a meter row."""
+    _full_label, style = node_label(node, usage)
     name = display_name or node.name
-    if len(name) > name_width:
-        name = name[: max(0, name_width - 1)] + "…"
-    label = f"{name} {marker}" if marker else name
-    return label[:width], style
+    if len(name) > width:
+        name = name[: max(0, width - 1)] + "…"
+    return name[:width], style
 
 
 def abbreviated_node_names(nodes: list[Node]) -> dict[str, str]:
@@ -534,6 +550,43 @@ def architecture_groups(
     return sorted(groups.items(), key=sort_key)
 
 
+def cluster_architectures(cluster: Cluster) -> list[NodeArchitecture]:
+    """Return hardware groups in their displayed order."""
+    if cluster.error:
+        return []
+    focus = "gpu" if cluster.has_gpus else "cpu"
+    return [
+        architecture
+        for architecture, _nodes in architecture_groups(cluster.nodes, focus)
+    ]
+
+
+def architecture_nodes(
+    cluster: Cluster,
+    architecture: NodeArchitecture,
+) -> list[Node]:
+    """Return selectable nodes belonging to one hardware group."""
+    return [
+        node
+        for node in cluster.nodes
+        if node_architecture(node) == architecture
+        and node.status not in ("drained", "reserved")
+    ]
+
+
+def selectable_nodes(cluster: Cluster) -> list[Node]:
+    """Return visible nodes in the same order used by the grouped node view."""
+    if cluster.error:
+        return []
+    focus = "gpu" if cluster.has_gpus else "cpu"
+    return [
+        node
+        for _architecture, nodes in architecture_groups(cluster.nodes, focus)
+        for node in nodes
+        if node.status not in ("drained", "reserved")
+    ]
+
+
 def architecture_header(
     architecture: NodeArchitecture,
     nodes: list[Node],
@@ -583,6 +636,7 @@ def node_resource_segments(
     width: int,
     free_style: str,
     busy_style: str,
+    display_mode: str,
 ) -> Line:
     return capacity_segments(
         capacity.free,
@@ -593,6 +647,7 @@ def node_resource_segments(
         mine_busy=capacity.mine,
         reserved_busy=capacity.mine_reserved,
         thin=True,
+        display_mode=display_mode,
     )
 
 
@@ -601,6 +656,8 @@ def cpu_node_lines(
     usage: UserNodeUsage | None = None,
     gutter: str = NODE_GROUP_GUTTER,
     display_name: str | None = None,
+    display_mode: str = "usage",
+    selected: bool = False,
 ) -> list[Line]:
     usage = usage or UserNodeUsage()
     blocked_style = STATUS_STYLES.get(node.status, "busy")
@@ -609,18 +666,19 @@ def cpu_node_lines(
     row = line(
         (gutter, "busy" if gutter != NODE_GROUP_GUTTER else "normal"),
         ("C ", "cpu"),
-        *node_resource_segments(cpu, 6, "cpu", blocked_style),
+        *node_resource_segments(cpu, 6, "cpu", blocked_style, display_mode),
         (" M ", "memory"),
-        *node_resource_segments(memory, 6, "memory", blocked_style),
+        *node_resource_segments(memory, 6, "memory", blocked_style, display_mode),
     )
     label_width = max(1, CLUSTER_WIDTH - visible_length(row) - 1)
-    return [
-        line(
-            *row,
-            (" ", "normal"),
-            clipped_node_label(node, usage, label_width, display_name),
-        )
-    ]
+    row = line(
+        *row,
+        (" ", "normal"),
+        clipped_node_label(node, usage, label_width, display_name),
+    )
+    if selected:
+        row = [(text, "selected") for text, _style in row]
+    return [row]
 
 
 def gpu_node_lines(
@@ -629,6 +687,8 @@ def gpu_node_lines(
     usage: UserNodeUsage | None = None,
     gutter: str = NODE_GROUP_GUTTER,
     display_name: str | None = None,
+    display_mode: str = "usage",
+    selected: bool = False,
 ) -> list[Line]:
     usage = usage or UserNodeUsage()
     gpu = node_resource_capacity(node, usage, "gpu")
@@ -638,39 +698,202 @@ def gpu_node_lines(
     row = line(
         (gutter, "busy" if gutter != NODE_GROUP_GUTTER else "normal"),
         ("G ", "free"),
-        *node_resource_segments(gpu, 4, "free", blocked_style),
+        *node_resource_segments(gpu, 4, "free", blocked_style, display_mode),
         (" C ", "cpu"),
-        *node_resource_segments(cpu, 3, "cpu", blocked_style),
+        *node_resource_segments(cpu, 3, "cpu", blocked_style, display_mode),
         (" M ", "memory"),
-        *node_resource_segments(memory, 3, "memory", blocked_style),
+        *node_resource_segments(memory, 3, "memory", blocked_style, display_mode),
     )
     label_width = max(1, CLUSTER_WIDTH - visible_length(row) - 1)
-    return [
-        line(
-            *row,
-            (" ", "normal"),
-            clipped_node_label(node, usage, label_width, display_name),
-        )
-    ]
+    row = line(
+        *row,
+        (" ", "normal"),
+        clipped_node_label(node, usage, label_width, display_name),
+    )
+    if selected:
+        row = [(text, "selected") for text, _style in row]
+    return [row]
 
 
-def cluster_body(cluster: Cluster, colored: bool) -> list[Line]:
+def cluster_body(
+    cluster: Cluster,
+    colored: bool,
+    display_mode: str = "usage",
+    selected_node_name: str | None = None,
+) -> list[Line]:
+    body, _positions, _architecture_positions, _window_starts = cluster_body_layout(
+        cluster,
+        colored,
+        display_mode,
+        selected_node_name,
+    )
+    return body
+
+
+def cluster_body_layout(
+    cluster: Cluster,
+    colored: bool,
+    display_mode: str = "usage",
+    selected_node_name: str | None = None,
+    *,
+    anchor_node_name: str | None = None,
+    selected_architecture: NodeArchitecture | None = None,
+    open_architecture: NodeArchitecture | None = None,
+    max_height: int | None = None,
+    window_starts: dict[NodeArchitecture, int] | None = None,
+) -> tuple[
+    list[Line],
+    dict[str, NodeRowPosition],
+    dict[NodeArchitecture, int],
+    dict[NodeArchitecture, int],
+]:
+    """Build a height-aware cluster body and record cursor positions."""
     if cluster.error:
-        return []
+        return [], {}, {}, {}
     body: list[Line] = []
+    positions: dict[str, NodeRowPosition] = {}
+    architecture_positions: dict[NodeArchitecture, int] = {}
+    updated_starts: dict[NodeArchitecture, int] = {}
     user_usage = current_user_usage(cluster)
     display_names = abbreviated_node_names(cluster.nodes)
     focus = "gpu" if cluster.has_gpus else "cpu"
+    groups = []
     for architecture, nodes in architecture_groups(cluster.nodes, focus):
-        if body:
-            body.append(plain(""))
-        body.extend(architecture_header(architecture, nodes, user_usage))
         visible_nodes = [
             node for node in nodes if node.status not in ("drained", "reserved")
         ]
-        for index, node in enumerate(visible_nodes):
+        groups.append(
+            (
+                architecture,
+                nodes,
+                visible_nodes,
+                architecture_header(architecture, nodes, user_usage),
+            )
+        )
+
+    anchor_node_name = anchor_node_name or selected_node_name
+    previous_starts = window_starts or {}
+
+    def slice_start(
+        architecture: NodeArchitecture,
+        visible_nodes: list[Node],
+        quota: int,
+    ) -> int:
+        if not quota:
+            return 0
+        contains_anchor = anchor_node_name is not None and any(
+            node.name == anchor_node_name for node in visible_nodes
+        )
+        scrolling_architecture = architecture == open_architecture or (
+            open_architecture is None and contains_anchor
+        )
+        max_start = max(0, len(visible_nodes) - quota)
+        previous = previous_starts.get(architecture, 0) if scrolling_architecture else 0
+        start = min(max(0, previous), max_start)
+        if scrolling_architecture and anchor_node_name is not None:
+            anchor_index = next(
+                (
+                    index
+                    for index, node in enumerate(visible_nodes)
+                    if node.name == anchor_node_name
+                ),
+                None,
+            )
+            if anchor_index is not None:
+                if anchor_index < start:
+                    start = anchor_index
+                elif anchor_index >= start + quota:
+                    start = anchor_index - quota + 1
+        return start
+
+    def indicator_count(
+        architecture: NodeArchitecture,
+        visible_nodes: list[Node],
+        quota: int,
+    ) -> int:
+        start = slice_start(architecture, visible_nodes, quota)
+        return int(start > 0) + int(start + quota < len(visible_nodes))
+
+    quotas = [min(5, len(visible_nodes)) for _, _, visible_nodes, _ in groups]
+    if max_height is None:
+        quotas = [len(visible_nodes) for _, _, visible_nodes, _ in groups]
+    else:
+        fixed_height = max(0, len(groups) - 1) + sum(
+            len(header) for _, _, _, header in groups
+        )
+        base_height = (
+            fixed_height
+            + sum(quotas)
+            + sum(
+                indicator_count(architecture, visible_nodes, quota)
+                for quota, (architecture, _nodes, visible_nodes, _header) in zip(
+                    quotas,
+                    groups,
+                    strict=True,
+                )
+            )
+        )
+        remaining = max(0, max_height - base_height)
+        while True:
+            changed = False
+            for index, (_architecture, _nodes, visible_nodes, _header) in enumerate(
+                groups
+            ):
+                if quotas[index] >= len(visible_nodes):
+                    continue
+                architecture = groups[index][0]
+                old_indicators = indicator_count(
+                    architecture,
+                    visible_nodes,
+                    quotas[index],
+                )
+                next_quota = quotas[index] + 1
+                new_indicators = indicator_count(
+                    architecture,
+                    visible_nodes,
+                    next_quota,
+                )
+                extra_height = 1 + new_indicators - old_indicators
+                if extra_height > remaining:
+                    continue
+                quotas[index] += 1
+                remaining -= extra_height
+                changed = True
+            if not changed:
+                break
+
+    for group_index, (architecture, _nodes, visible_nodes, header) in enumerate(groups):
+        if body:
+            body.append(plain(""))
+        group_start = len(body)
+        architecture_positions[architecture] = group_start
+        if header and architecture == selected_architecture:
+            header = [
+                [(text, "selected") for text, _style in header_row]
+                for header_row in header
+            ]
+        body.extend(header)
+        quota = quotas[group_index]
+        start = slice_start(architecture, visible_nodes, quota)
+        updated_starts[architecture] = start
+        displayed_nodes = visible_nodes[start : start + quota]
+        if start:
+            body.append(
+                line(
+                    (NODE_GROUP_CHILD, "busy"),
+                    (f"… {start} more", "busy"),
+                )
+            )
+        below_count = max(0, len(visible_nodes) - start - len(displayed_nodes))
+        for index, node in enumerate(displayed_nodes):
+            positions[node.name] = NodeRowPosition(
+                row=len(body),
+                group_start=group_start,
+            )
             gutter = (
-                NODE_GROUP_END if index == len(visible_nodes) - 1 else NODE_GROUP_CHILD
+                NODE_GROUP_END
+                if index == len(displayed_nodes) - 1 and not below_count
+                else NODE_GROUP_CHILD
             )
             if architecture.gpu_total:
                 body.extend(
@@ -680,6 +903,8 @@ def cluster_body(cluster: Cluster, colored: bool) -> list[Line]:
                         user_usage[node.name],
                         gutter,
                         display_names[node.name],
+                        display_mode,
+                        node.name == selected_node_name,
                     )
                 )
             else:
@@ -689,9 +914,138 @@ def cluster_body(cluster: Cluster, colored: bool) -> list[Line]:
                         user_usage[node.name],
                         gutter,
                         display_names[node.name],
+                        display_mode,
+                        node.name == selected_node_name,
                     )
                 )
-    return body
+        if below_count:
+            body.append(
+                line(
+                    (NODE_GROUP_END, "busy"),
+                    (f"… {below_count} more", "busy"),
+                )
+            )
+    return body, positions, architecture_positions, updated_starts
+
+
+def node_detail_lines(cluster: Cluster, node: Node) -> list[Line]:
+    """Show exact scheduler allocation counts for one selected node."""
+
+    def resource_line(
+        label: str,
+        allocated: int,
+        free: int,
+        total: int,
+        style: str,
+        unit: str = "",
+    ) -> Line:
+        suffix = f" {unit}" if unit else ""
+        blocked = max(0, total - allocated - free)
+        values: Line = [
+            (f"{allocated:,}{suffix} allocated", "normal"),
+            (" · ", "busy"),
+            (f"{free:,}{suffix} free", "normal"),
+        ]
+        if blocked:
+            values.extend(
+                [
+                    (" · ", "busy"),
+                    (f"{blocked:,}{suffix} blocked", "normal"),
+                ]
+            )
+        values.extend(
+            [
+                (" · ", "busy"),
+                (f"{total:,}{suffix} total", "normal"),
+            ]
+        )
+        return line((f"{label:<5}", style), *values)
+
+    details = [
+        line(("─" * CLUSTER_WIDTH, "busy")),
+        line(("NODE  ", "title"), (node.name, "title")),
+        line(
+            ("cluster  ", "busy"),
+            (cluster.name, "normal"),
+            (" · state  ", "busy"),
+            (node.state, STATUS_STYLES.get(node.status, "normal")),
+        ),
+    ]
+    if node.gpu_total:
+        gpu_line = resource_line(
+            "GPU",
+            node.gpu_alloc,
+            node.gpu_free,
+            node.gpu_total,
+            "free",
+        )
+        if node.gpu_type:
+            gpu_line.extend([(" · type  ", "busy"), (node.gpu_type, "normal")])
+        details.append(gpu_line)
+    details.extend(
+        [
+            resource_line(
+                "CPU",
+                node.cpu_alloc,
+                node.cpu_free,
+                node.cpu_total,
+                "cpu",
+            ),
+            resource_line(
+                "RAM",
+                node.mem_alloc,
+                node.mem_free,
+                node.mem_total,
+                "memory",
+                "MiB",
+            ),
+        ]
+    )
+    return details
+
+
+def architecture_detail_lines(
+    cluster: Cluster,
+    architecture: NodeArchitecture,
+) -> list[Line]:
+    """Describe the hardware group under the architecture cursor."""
+    nodes = [node for node in cluster.nodes if node_architecture(node) == architecture]
+    available = len(architecture_nodes(cluster, architecture))
+    unavailable = len(nodes) - available
+    if architecture.gpu_total:
+        hardware = f"{architecture.gpu_total} GPUs"
+        if architecture.gpu_type:
+            hardware = f"{architecture.gpu_total}×{architecture.gpu_type}"
+    else:
+        hardware = "CPU"
+    availability: Line = [
+        (f"{available:,} selectable", "normal"),
+    ]
+    if unavailable:
+        availability.extend(
+            [
+                (" · ", "busy"),
+                (f"{unavailable:,} reserved/down", "busy"),
+            ]
+        )
+    return [
+        line(("─" * CLUSTER_WIDTH, "busy")),
+        line(("ARCHITECTURE  ", "title"), (hardware, "title")),
+        line(
+            ("cluster  ", "busy"),
+            (cluster.name, "normal"),
+            (" · nodes  ", "busy"),
+            (f"{len(nodes):,}", "normal"),
+        ),
+        line(
+            ("per node  ", "busy"),
+            (f"{architecture.cpu_total} CPU", "cpu"),
+            (" · ", "busy"),
+            (f"{compact_memory(architecture.mem_total)} RAM", "memory"),
+        ),
+        availability,
+        line(("Enter", "title"), (" browse nodes", "normal")),
+    ]
 
 
 def legend_lines(
@@ -699,30 +1053,50 @@ def legend_lines(
     refreshing: bool,
     colored: bool,
     refresh_seconds: int,
+    display_mode: str = "usage",
+    browsing_nodes: bool = False,
 ) -> list[Line]:
     age = "waiting for data" if age_seconds is None else f"{age_seconds}s ago"
+    resource_suffix = "usage" if display_mode == "usage" else "free"
+    total_suffix = "used" if display_mode == "usage" else "free"
+    muted_label = "free capacity" if display_mode == "usage" else "other use / blocked"
 
     result = [
         line(("LEGEND", "title")),
         line(("─" * LEGEND_WIDTH, "busy")),
-        line(("C ▆", "cpu"), ("  CPU free", "normal")),
-        line(("M ▆", "memory"), ("  memory free", "normal")),
-        line(("G ▆", "free"), ("  GPU free", "normal")),
-        line(("  ▆", "busy"), ("  other use / blocked", "normal")),
-        *ownership_legend_lines(),
-        line(("X", "exclusive"), ("  another user's node", "normal")),
-        line(("F", "busy"), ("  resource fully used", "normal")),
-        plain("totals ▆ + free/total"),
-        plain("nodes ━ show capacity"),
-        plain("bar order: U R other free"),
+        line(("C ▆", "cpu"), (f"  CPU {resource_suffix}", "normal")),
+        line(("M ▆", "memory"), (f"  memory {resource_suffix}", "normal")),
+        line(("G ▆", "free"), (f"  GPU {resource_suffix}", "normal")),
+        line(("  ▆", "busy"), (f"  {muted_label}", "normal")),
+        line(("  ▆", "mine"), ("  your usage", "normal")),
+        line(("  ▆", "mine_reserved"), ("  your reservation", "normal")),
+        line(("selected", "selected"), ("  architecture / node", "normal")),
+        line(
+            ("█", "cpu"),
+            ("│", "busy"),
+            (
+                "  architecture nodes" if browsing_nodes else "  column position",
+                "normal",
+            ),
+        ),
+        line(("node", "exclusive"), ("  another user's node", "normal")),
+        line(("node", "busy"), ("  fully used node", "normal")),
+        plain(f"totals ▆ + {total_suffix}/total"),
+        plain(f"nodes ━ show {resource_suffix}"),
+        plain(f"emphasis: {display_mode}"),
         plain("header: GPU · CPU · RAM"),
         plain("│/└  group members"),
+        plain("… N more above/below"),
         plain("names shorten; … = clipped"),
         plain(""),
         line(("KEYS", "title")),
         plain("Tab views   r refresh"),
-        plain("arrows scroll   Pg page"),
-        plain("Home/End top/bottom"),
+        plain("↑/↓  select node" if browsing_nodes else "↑/↓  select architecture"),
+        plain("Enter  architectures" if browsing_nodes else "Enter  browse nodes"),
+        plain("Esc  return to group" if browsing_nodes else "Esc  clear selection"),
+        plain("←/→  select cluster"),
+        plain("PgUp/PgDn  select page"),
+        plain("Home/End  first/last"),
         plain("q quit"),
         plain(""),
         line(("LAST REFRESH", "title")),
