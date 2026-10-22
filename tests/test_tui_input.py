@@ -19,9 +19,7 @@ class InputScreen:
 
 
 def test_repeated_navigation_is_batched_and_next_action_is_preserved():
-    screen = InputScreen(
-        [curses.KEY_DOWN, curses.KEY_DOWN, curses.KEY_DOWN, ord("q")]
-    )
+    screen = InputScreen([curses.KEY_DOWN, curses.KEY_DOWN, curses.KEY_DOWN, ord("q")])
 
     key, repeat, pending = read_keypress(screen, None)  # type: ignore[arg-type]
 

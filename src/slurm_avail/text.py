@@ -73,36 +73,89 @@ def capacity_bar(
     width: int,
     free_style: str,
     busy_style: str = "busy",
-    highlighted_busy: int = 0,
-    highlight_style: str = "mine",
-    show_busy_when_present: bool = False,
+    mine_busy: int = 0,
+    reserved_busy: int = 0,
+    thin: bool = False,
 ) -> Line:
-    free_slots = rounded_free_slots(free, total, width)
-    if (
-        free > 0
-        and free_slots == width
-        and (highlighted_busy > 0 or (show_busy_when_present and free < total))
-    ):
-        free_slots -= 1
-    busy_slots = width - free_slots
-    highlight_slots = min(
-        busy_slots,
-        rounded_free_slots(highlighted_busy, total, width),
+    """Draw non-overlapping owned, occupied, and free capacity left to right."""
+    segments = capacity_segments(
+        free,
+        total,
+        width,
+        free_style,
+        busy_style,
+        mine_busy,
+        reserved_busy,
+        thin,
     )
-    other_busy_slots = busy_slots - highlight_slots
     return line(
-        (f"{label} [", free_style),
-        ("█" * free_slots, free_style),
-        ("░" * other_busy_slots, busy_style),
-        ("█" * highlight_slots, highlight_style),
-        (f"] {stats}", "normal"),
+        (f"{label}  ", free_style),
+        *segments,
+        (f"  {stats}", "normal"),
+    )
+
+
+def capacity_segments(
+    free: int,
+    total: int,
+    width: int,
+    free_style: str,
+    busy_style: str = "busy",
+    mine_busy: int = 0,
+    reserved_busy: int = 0,
+    thin: bool = False,
+) -> Line:
+    """Draw only the colored cells of a capacity bar."""
+    free = min(max(0, free), max(0, total))
+    occupied = max(0, total - free)
+    mine_busy = min(max(0, mine_busy), occupied)
+    reserved_busy = min(max(0, reserved_busy), occupied - mine_busy)
+    other_busy = occupied - mine_busy - reserved_busy
+    values = (mine_busy, reserved_busy, other_busy, free)
+    active = [index for index, value in enumerate(values) if value > 0]
+    slots = [0] * len(values)
+    if active and width > 0:
+        if len(active) >= width:
+            for index in active[:width]:
+                slots[index] = 1
+        else:
+            denominator = sum(values[index] for index in active)
+            exact = [width * value / denominator for value in values]
+            slots = [math.floor(share) for share in exact]
+            leftover = width - sum(slots)
+            ranked = sorted(
+                active,
+                key=lambda index: exact[index] - math.floor(exact[index]),
+                reverse=True,
+            )
+            for index in ranked[:leftover]:
+                slots[index] += 1
+            for index in active:
+                if slots[index] > 0:
+                    continue
+                donor = max(
+                    (candidate for candidate in active if slots[candidate] > 1),
+                    key=lambda candidate: slots[candidate] - exact[candidate],
+                )
+                slots[donor] -= 1
+                slots[index] = 1
+
+    mine_slots, reserved_slots, other_slots, free_slots = slots
+    mine_symbol = reserved_symbol = other_symbol = free_symbol = "━"
+    if not thin:
+        mine_symbol = reserved_symbol = other_symbol = free_symbol = "▆"
+    return line(
+        (mine_symbol * mine_slots, "mine"),
+        (reserved_symbol * reserved_slots, "mine_reserved"),
+        (other_symbol * other_slots, busy_style),
+        (free_symbol * free_slots, free_style),
     )
 
 
 def ownership_legend_lines() -> list[Line]:
     return [
-        line(("U ■", "mine"), (" your usage", "normal")),
-        line(("R ■", "mine_reserved"), (" your reservation", "normal")),
+        line(("U ▆", "mine"), (" your usage", "normal")),
+        line(("R ▆", "mine_reserved"), (" your reservation", "normal")),
     ]
 
 
