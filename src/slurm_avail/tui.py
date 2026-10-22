@@ -1103,9 +1103,21 @@ def dashboard(
                         styles,
                     )
                 detail_y = content_y + header_height + body_height
-                for detail_row in details[:detail_height]:
+                for detail_index, detail_row in enumerate(details[:detail_height]):
                     if detail_y >= screen_height:
                         break
+                    if detail_index == 0:
+                        draw_spans(
+                            screen,
+                            detail_y,
+                            0,
+                            [("─" * (fixed_divider_x + 1), "busy")],
+                            0,
+                            fixed_divider_x + 1,
+                            styles,
+                        )
+                        detail_y += 1
+                        continue
                     draw_spans(
                         screen,
                         detail_y,

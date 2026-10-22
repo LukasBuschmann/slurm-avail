@@ -10,10 +10,10 @@ from datetime import datetime
 
 from .constants import JOBS_TABLE_WIDTH, LEGEND_WIDTH, Line
 from .models import Cluster, FairshareAssociation, PriorityFactors, UserJob
-from .text import line, plain, visible_length
+from .text import compact_memory, line, plain, visible_length
 
 CLUSTER_WIDTH = 10
-NAME_WIDTH = 20
+NAME_WIDTH = 24
 RESULT_WIDTH = 13
 TIME_LIMIT_WIDTH = 11
 NODES_WIDTH = 6
@@ -29,6 +29,22 @@ PRIORITY_LEVELS = "▁▂▃▄▅▆▇█"
 GROUP_PREVIEW_COUNT = 5
 GROUP_MARKER = "▾ "
 GROUP_GUTTER = "  "
+GROUP_CHILD = "│ "
+GROUP_END = "└ "
+DETAIL_BAR_WIDTH = 28
+ELAPSED_HISTOGRAM_MAX_BINS = 24
+HISTOGRAM_LEVELS = "▁▂▃▄▅▆▇█"
+CLUSTER_STYLES = ("cpu", "memory", "exclusive", "mine", "running")
+FAILED_STATES = {
+    "BOOT_FAIL",
+    "DEADLINE",
+    "FAILED",
+    "NODE_FAIL",
+    "OUT_OF_MEMORY",
+    "PREEMPTED",
+    "REVOKED",
+    "TIMEOUT",
+}
 
 
 @dataclass(frozen=True)
@@ -146,16 +162,7 @@ def state_style(job: UserJob) -> str:
             return "free"
         if state == "CANCELLED":
             return "offline"
-        if state in {
-            "BOOT_FAIL",
-            "DEADLINE",
-            "FAILED",
-            "NODE_FAIL",
-            "OUT_OF_MEMORY",
-            "PREEMPTED",
-            "REVOKED",
-            "TIMEOUT",
-        }:
+        if state in FAILED_STATES:
             return "drained"
         return "normal"
     return "running" if job.is_running else "reserved"
@@ -435,10 +442,16 @@ def table_job_row(
     job: UserJob,
     selected: bool,
     show_name: bool = True,
+    gutter: str = GROUP_GUTTER,
 ) -> Line:
     """Reserve the group-marker gutter without shifting table columns."""
+    gutter_style = "normal"
+    if gutter != GROUP_GUTTER:
+        gutter_style = "busy"
+    if selected:
+        gutter_style = "selected"
     return line(
-        (GROUP_GUTTER, "selected" if selected else "normal"),
+        (gutter, gutter_style),
         *job_row(cluster, job, selected, show_name),
     )
 
@@ -638,12 +651,267 @@ def job_time(value: float | None) -> str:
     return datetime.fromtimestamp(value).astimezone().strftime("%Y-%m-%d %H:%M:%S")
 
 
+def proportional_slots(counts: list[int], width: int) -> list[int]:
+    """Allocate a fixed-width bar while keeping every non-empty part visible."""
+    slots = [0] * len(counts)
+    active = [index for index, count in enumerate(counts) if count > 0]
+    if not active or width <= 0:
+        return slots
+    if len(active) >= width:
+        for index in active[:width]:
+            slots[index] = 1
+        return slots
+
+    for index in active:
+        slots[index] = 1
+    remaining = width - len(active)
+    total = sum(counts[index] for index in active)
+    exact = [remaining * counts[index] / total for index in active]
+    for index, share in zip(active, exact, strict=True):
+        slots[index] += math.floor(share)
+    leftover = width - sum(slots)
+    ranked = sorted(
+        range(len(active)),
+        key=lambda position: exact[position] - math.floor(exact[position]),
+        reverse=True,
+    )
+    for position in ranked[:leftover]:
+        slots[active[position]] += 1
+    return slots
+
+
+def portion_row(
+    label: str,
+    segments: list[tuple[str, int, str]],
+    *,
+    show_zero: bool = False,
+) -> Line:
+    """Render exact counts beside a proportional colored bar."""
+    visible = [segment for segment in segments if segment[1] > 0]
+    if not visible:
+        return plain(f"{label:<10}—")
+    slots = proportional_slots(
+        [count for _name, count, _style in visible],
+        DETAIL_BAR_WIDTH,
+    )
+    row = line((f"{label:<10}[", "normal"))
+    for (_name, _count, style), slot_count in zip(visible, slots, strict=True):
+        row.append(("█" * slot_count, style))
+    row.append(("]  ", "normal"))
+    labels = segments if show_zero else visible
+    for index, (name, count, style) in enumerate(labels):
+        if index:
+            row.append(("  ", "normal"))
+        row.append((f"{count:,} {name}", style))
+    return row
+
+
+def requested_memory_mb(job: UserJob) -> int | None:
+    """Return total requested memory, including Slurm's per-CPU/node suffix."""
+    match = re.fullmatch(
+        r"\s*(\d+(?:\.\d+)?)([KMGTP]?)([cn]?)\s*",
+        job.memory,
+        re.IGNORECASE,
+    )
+    if match is None:
+        return None
+    amount_text, raw_unit, scope = match.groups()
+    factors = {
+        "": 1,
+        "K": 1 / 1024,
+        "M": 1,
+        "G": 1024,
+        "T": 1024**2,
+        "P": 1024**3,
+    }
+    multiplier = (
+        max(1, requested_cpu_count(job))
+        if scope.lower() == "c"
+        else max(1, job.node_count)
+    )
+    return math.ceil(float(amount_text) * factors[raw_unit.upper()] * multiplier)
+
+
+def formatted_memory_total(memory_mb: int) -> str:
+    if memory_mb < 1024:
+        return f"{memory_mb}M"
+    return compact_memory(memory_mb)
+
+
+def group_resource_row(jobs: list[UserJob]) -> Line:
+    cores = sum(requested_cpu_count(job) for job in jobs)
+    memory_values = [requested_memory_mb(job) for job in jobs]
+    known_memory = [value for value in memory_values if value is not None]
+    memory_text = (
+        formatted_memory_total(sum(known_memory)) if known_memory else "unknown"
+    )
+    unknown_count = len(memory_values) - len(known_memory)
+    suffix = f"  ·  {unknown_count} RAM requests unknown" if unknown_count else ""
+    return plain(f"resources {cores:,} CPU cores  ·  {memory_text} RAM{suffix}")
+
+
+def parse_slurm_duration(value: str) -> int | None:
+    value = value.strip()
+    if value and value not in ("—", "N/A", "Unknown", "None", "(null)"):
+        day_text, separator, clock_text = value.partition("-")
+        if separator and not day_text.isdigit():
+            return None
+        days = int(day_text) if separator and day_text.isdigit() else 0
+        raw_clock = clock_text if separator else day_text
+        parts = raw_clock.split(":")
+        if all(part.isdigit() for part in parts):
+            numbers = [int(part) for part in parts]
+            if len(numbers) == 3:
+                hours, minutes, seconds = numbers
+                return ((days * 24 + hours) * 60 + minutes) * 60 + seconds
+            if len(numbers) == 2:
+                minutes, seconds = numbers
+                return (days * 24 * 60 + minutes) * 60 + seconds
+            if len(numbers) == 1 and not separator:
+                return numbers[0] * 60
+    return None
+
+
+def elapsed_seconds(job: UserJob) -> int | None:
+    parsed = parse_slurm_duration(job.elapsed)
+    if parsed is not None:
+        return parsed
+    if job.start is not None and job.end is not None:
+        return max(0, round(job.end - job.start))
+    return None
+
+
+def requested_gpu_count(job: UserJob) -> int:
+    allocated = gpu_request_parts(job.allocated_tres)
+    if allocated is not None:
+        return int(allocated[1])
+    requested = gpu_request_parts(job.tres_per_node)
+    if requested is None:
+        return 0
+    count = int(requested[1])
+    return count if job.historical else count * max(1, job.node_count)
+
+
+def formatted_hours(hours: float) -> str:
+    if hours == 0:
+        return "0"
+    if hours < 0.01:
+        return "<0.01"
+    if hours >= 100:
+        return f"{hours:,.0f}"
+    precision = 1 if hours >= 10 else 2
+    return f"{hours:,.{precision}f}".rstrip("0").rstrip(".")
+
+
+def group_compute_hours_row(group: JobGroup, jobs: list[UserJob]) -> Line:
+    durations = [
+        elapsed_seconds(job)
+        if group.key.historical
+        else parse_slurm_duration(job.time_limit)
+        for job in jobs
+    ]
+    known = [
+        (job, duration)
+        for job, duration in zip(jobs, durations, strict=True)
+        if duration is not None
+    ]
+    cpu_hours = (
+        sum(requested_cpu_count(job) * duration for job, duration in known) / 3600
+    )
+    gpu_hours = (
+        sum(requested_gpu_count(job) * duration for job, duration in known) / 3600
+    )
+    parts = [f"{formatted_hours(cpu_hours)} CPU h"]
+    if any(requested_gpu_count(job) for job in jobs):
+        parts.append(f"{formatted_hours(gpu_hours)} GPU h")
+    basis = "elapsed" if group.key.historical else "max at time limits"
+    unknown_count = len(jobs) - len(known)
+    suffix = f"  ·  {unknown_count} jobs unknown" if unknown_count else ""
+    return plain(f"compute   {'  ·  '.join(parts)}  {basis}{suffix}")
+
+
+def compact_duration(seconds: float) -> str:
+    seconds = max(0, round(seconds))
+    if seconds < 60:
+        return f"{seconds}s"
+    minutes, remainder = divmod(seconds, 60)
+    if minutes < 60:
+        return f"{minutes}m{remainder:02d}s" if remainder else f"{minutes}m"
+    hours, minutes = divmod(minutes, 60)
+    if hours < 24:
+        return f"{hours}h{minutes:02d}m" if minutes else f"{hours}h"
+    days, hours = divmod(hours, 24)
+    return f"{days}d{hours:02d}h" if hours else f"{days}d"
+
+
+def elapsed_histogram_row(jobs: list[UserJob]) -> Line:
+    values = sorted(
+        seconds for job in jobs if (seconds := elapsed_seconds(job)) is not None
+    )
+    if not values:
+        return plain("elapsed   unavailable")
+    if values[0] == values[-1]:
+        return line(
+            ("elapsed   [", "normal"),
+            ("█" * 8, "cpu"),
+            ("]  ", "normal"),
+            (f"all {compact_duration(values[0])}", "cpu"),
+        )
+
+    bin_count = min(
+        ELAPSED_HISTOGRAM_MAX_BINS,
+        max(8, math.ceil(math.sqrt(len(values)) * 2)),
+    )
+    counts = [0] * bin_count
+    span = values[-1] - values[0]
+    for value in values:
+        index = min(bin_count - 1, (value - values[0]) * bin_count // span)
+        counts[index] += 1
+    maximum = max(counts)
+    bars = [
+        " "
+        if count == 0
+        else HISTOGRAM_LEVELS[
+            min(
+                len(HISTOGRAM_LEVELS) - 1,
+                math.ceil(count * len(HISTOGRAM_LEVELS) / maximum) - 1,
+            )
+        ]
+        for count in counts
+    ]
+    middle = len(values) // 2
+    median = (
+        values[middle] if len(values) % 2 else (values[middle - 1] + values[middle]) / 2
+    )
+    return line(
+        (f"elapsed   {compact_duration(values[0]):>7} [", "normal"),
+        ("".join(bars), "cpu"),
+        ("] ", "normal"),
+        (f"{compact_duration(values[-1]):<7}", "normal"),
+        (f"  median {compact_duration(median)}", "busy"),
+    )
+
+
+def cluster_distribution_row(group: JobGroup) -> Line:
+    counts = Counter(cluster.name for cluster, _job in group.entries)
+    if len(counts) == 1:
+        return plain(f"clusters  {next(iter(counts))}")
+    ordered = sorted(counts.items(), key=lambda item: (-item[1], item[0]))
+    return portion_row(
+        "clusters",
+        [
+            (name, count, CLUSTER_STYLES[index % len(CLUSTER_STYLES)])
+            for index, (name, count) in enumerate(ordered)
+        ],
+    )
+
+
 def selected_job_details(cluster: Cluster, job: UserJob) -> list[Line]:
     placement, placement_style = placement_label(job)
     status = job.state if job.historical else placement
     status_style = state_style(job) if job.historical else placement_style
     rows: list[Line] = [
-        plain("═" * JOBS_TABLE_WIDTH),
+        line(("─" * JOBS_TABLE_WIDTH, "busy")),
         line((f"SELECTED JOB {job.job_id} · {cluster.name}", "title")),
         line(
             ("owner ", "normal"),
@@ -715,57 +983,56 @@ def selected_job_details(cluster: Cluster, job: UserJob) -> list[Line]:
 
 def selected_group_details(group: JobGroup) -> list[Line]:
     jobs = [job for _cluster, job in group.entries]
-    clusters = sorted({cluster.name for cluster, _job in group.entries})
     rows = [
-        plain("═" * JOBS_TABLE_WIDTH),
-        line(("JOB GROUP", "title")),
-        line(("name        ", "normal"), (group.key.name, "title")),
-        plain(
-            f"scope       {len(jobs)} "
-            f"{'history' if group.key.historical else 'current'} jobs"
+        line(("─" * JOBS_TABLE_WIDTH, "busy")),
+        line(
+            ("JOB GROUP  ", "title"),
+            (group.key.name, "title"),
+            (
+                f"  {len(jobs):,} "
+                f"{'history' if group.key.historical else 'current'} jobs",
+                "normal",
+            ),
         ),
-        plain(f"clusters    {', '.join(clusters)}"),
+        cluster_distribution_row(group),
+        group_resource_row(jobs),
+        group_compute_hours_row(group, jobs),
     ]
     if group.key.historical:
         states = Counter(
             job.state.split(maxsplit=1)[0].rstrip("+").upper() for job in jobs
         )
-        result_row = line(("results     ", "normal"))
-        for index, (state, count) in enumerate(
-            sorted(states.items(), key=lambda item: (-item[1], item[0]))
-        ):
-            if index:
-                result_row.append(("   ", "normal"))
-            sample = next(
-                job
-                for job in jobs
-                if job.state.split(maxsplit=1)[0].rstrip("+").upper() == state
+        succeeded = states.pop("COMPLETED", 0)
+        cancelled = states.pop("CANCELLED", 0)
+        failed = sum(states.pop(state, 0) for state in FAILED_STATES)
+        other = sum(states.values())
+        rows.append(
+            portion_row(
+                "results",
+                [
+                    ("succeeded", succeeded, "free"),
+                    ("cancelled", cancelled, "offline"),
+                    ("failed", failed, "drained"),
+                    *([("other", other, "normal")] if other else []),
+                ],
+                show_zero=True,
             )
-            result_row.append((f"{count} {state.lower()}", state_style(sample)))
-        rows.append(result_row)
+        )
+        rows.append(elapsed_histogram_row(jobs))
     else:
         running = sum(job.is_running for job in jobs)
         pending = len(jobs) - running
-        placements = Counter(job.placement for job in jobs if not job.is_running)
         rows.append(
-            line(
-                ("status      ", "normal"),
-                (f"{running} running", "running"),
-                ("   ", "normal"),
-                (f"{pending} pending", "reserved"),
+            portion_row(
+                "status",
+                [
+                    ("running", running, "running"),
+                    ("pending", pending, "reserved"),
+                ],
+                show_zero=True,
             )
         )
-        rows.append(
-            line(
-                ("placement   ", "normal"),
-                (f"{placements['planned']} planned", "free"),
-                ("   ", "normal"),
-                (f"{placements['estimate']} estimate", "reserved"),
-                ("   ", "normal"),
-                (f"{placements['none']} no estimate", "busy"),
-            )
-        )
-    rows.append(line(("Enter opens a table containing only this job name.", "busy")))
+    rows.append(line(("Enter opens every job in this group.", "busy")))
     return rows
 
 
@@ -809,12 +1076,6 @@ def jobs_table(
             ("ENDED", START_WIDTH),
         )
     )
-    context = "current users · scheduler start estimates are not guarantees"
-    if selected_scope_index != 0:
-        context = (
-            f"user {scoped_clusters[0].user or '—'} · "
-            "scheduler start estimates are not guarantees"
-        )
     if drilldown is not None:
         entries = jobs_in_group(
             clusters,
@@ -832,12 +1093,14 @@ def jobs_table(
             history_column_header if drilldown.historical else live_column_header
         )
         headers = [
-            line((f'JOBS NAMED "{drilldown.name}"', "title")),
             menu,
-            plain(context + " · Esc returns to grouped jobs"),
             plain(""),
+            line(
+                (f'JOBS NAMED "{drilldown.name}"', "title"),
+                (f"  {selection_count:,} jobs", "busy"),
+            ),
             line((column_header, "title")),
-            plain("-" * len(column_header)),
+            plain("─" * len(column_header)),
         ]
         body: list[Line] = []
         selected_body_index = 0
@@ -871,16 +1134,27 @@ def jobs_table(
     selected_job_index = (
         min(max(0, selected_job_index), len(groups) - 1) if groups else 0
     )
-    headers = [
-        line(("RUNNING + PENDING", "title")),
-        menu,
-        plain(context),
-        plain(""),
-        line((live_column_header, "title")),
-        plain("-" * len(live_column_header)),
-    ]
     live_groups = [group for group in groups if not group.key.historical]
     past_groups = [group for group in groups if group.key.historical]
+    live_count = sum(len(group.entries) for group in live_groups)
+    running_count = sum(
+        job.is_running for group in live_groups for _cluster, job in group.entries
+    )
+    pending_count = live_count - running_count
+    past_count = sum(len(group.entries) for group in past_groups)
+    headers = [
+        menu,
+        plain(""),
+        line(
+            ("RUNNING + PENDING", "title"),
+            ("  ", "normal"),
+            (f"{running_count:,} running", "running"),
+            (" · ", "busy"),
+            (f"{pending_count:,} pending", "reserved"),
+        ),
+        line((live_column_header, "title")),
+        plain("─" * len(live_column_header)),
+    ]
     body = []
     selected_body_index = 0
     group_index = 0
@@ -892,14 +1166,28 @@ def jobs_table(
             selected_body_index = len(body)
         if group.grouped and group_by_name:
             body.append(group_job_row(group, selected))
-            for cluster, job in group.entries[:GROUP_PREVIEW_COUNT]:
-                body.append(table_job_row(cluster, job, False, show_name=False))
+            preview = group.entries[:GROUP_PREVIEW_COUNT]
             remaining = len(group.entries) - GROUP_PREVIEW_COUNT
+            for index, (cluster, job) in enumerate(preview):
+                gutter = (
+                    GROUP_END
+                    if remaining <= 0 and index == len(preview) - 1
+                    else GROUP_CHILD
+                )
+                body.append(
+                    table_job_row(
+                        cluster,
+                        job,
+                        False,
+                        show_name=False,
+                        gutter=gutter,
+                    )
+                )
             if remaining > 0:
                 body.append(
                     line(
                         (
-                            " " * (NAME_WIDTH + 3) + f"… {remaining} more",
+                            GROUP_END + f"… {remaining:,} more",
                             "busy",
                         )
                     )
@@ -927,9 +1215,9 @@ def jobs_table(
     body.extend(
         (
             plain(""),
-            line(("RECENT HISTORY", "title")),
+            line(("RECENT HISTORY", "title"), (f"  {past_count:,} jobs", "busy")),
             line((history_column_header, "title")),
-            plain("-" * len(history_column_header)),
+            plain("─" * len(history_column_header)),
         )
     )
     for group in past_groups:
@@ -986,7 +1274,7 @@ def sticky_jobs_headers(
         return headers, vertical_offset
     history_rows_start = history_title_index + 3
     sticky = list(headers)
-    sticky[0] = body[history_title_index]
+    sticky[-3] = body[history_title_index]
     sticky[-2] = body[history_title_index + 1]
     sticky[-1] = body[history_title_index + 2]
     return sticky, max(vertical_offset, history_rows_start)
@@ -1011,7 +1299,12 @@ def jobs_legend_lines(
     result = [
         line(("LEGEND", "title")),
         plain("-" * LEGEND_WIDTH),
-        line(("selected", "selected"), (" job", "normal")),
+        line(("selected", "selected"), (" row", "normal")),
+        *(
+            [line((GROUP_MARKER, "title"), ("grouped job name", "normal"))]
+            if group_by_name and not drilldown
+            else []
+        ),
         line(("RUNNING", "running"), (" executing now", "normal")),
         line(("COMPLETED", "free"), (" successful past job", "normal")),
         line(("CANCELLED", "offline"), (" cancelled past job", "normal")),

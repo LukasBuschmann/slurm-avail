@@ -207,6 +207,8 @@ def render_jobs_once(
         history_refresh_seconds=settings.jobs_history_refresh_seconds,
         group_by_name=settings.group_jobs_by_name,
     )
+    if details:
+        details[0] = [("─" * table_width, "busy")]
     table_rows = headers + body + details
     total_height = max(len(table_rows), len(legend))
     legend_x = table_width + GAP

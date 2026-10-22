@@ -160,11 +160,17 @@ def test_jobs_table_groups_names_with_five_job_preview_and_summary_details() -> 
     assert "… 3 more" in body_text
     assert "NAME" in "".join(value for value, _style in _headers[-2])
     assert "".join(value for value, _style in _headers[-2]).lstrip().startswith("NAME")
+    assert "CLUSTER" in "".join(value for value, _style in _headers[0])
+    assert "RUNNING + PENDING" in "".join(value for value, _style in _headers[-3])
+    assert "scheduler start estimates" not in "\n".join(
+        "".join(value for value, _style in row) for row in _headers
+    )
     assert "JOB GROUP" in detail_text
-    assert "name        array-task" in detail_text
-    assert "scope       8 current jobs" in detail_text
-    assert "1 running   7 pending" in detail_text
-    assert "1 planned   0 estimate   6 no estimate" in detail_text
+    assert "array-task  8 current jobs" in detail_text
+    assert "resources 8 CPU cores  ·  8G RAM" in detail_text
+    assert "compute   8 CPU h  max at time limits" in detail_text
+    assert "1 running  7 pending" in detail_text
+    assert "placement" not in detail_text
     assert jobs_selection_count([cluster], 0) == 1
 
     singleton = named_job("9", "single-task")
@@ -176,8 +182,63 @@ def test_jobs_table_groups_names_with_five_job_preview_and_summary_details() -> 
         for row in aligned_body
         if "single-task" in "".join(value for value, _style in row)
     )
+    assert grouped_child.startswith("│ ")
+    assert "".join(value for value, _style in aligned_body[6]).startswith("└ ")
     assert group_row.index("array-task") == singleton_row.index("single-task")
     assert grouped_child.index("CPU") == singleton_row.index("CPU")
+
+
+def test_history_group_details_visualize_results_elapsed_and_cluster_share() -> None:
+    jobs = [
+        named_job(str(index), "shared-analysis", historical=True)
+        for index in range(1, 5)
+    ]
+    for job, elapsed in zip(
+        jobs,
+        ("00:01:00", "00:02:00", "00:03:00", "00:04:00"),
+        strict=True,
+    ):
+        job.elapsed = elapsed
+        job.allocated_tres = "cpu=1,gres/gpu=2"
+    jobs[2].state = "FAILED"
+    jobs[3].state = "CANCELLED"
+    clusters = [
+        Cluster(name="ALPHA", host="login", past_jobs=jobs[:2]),
+        Cluster(name="BETA", host="login", past_jobs=jobs[2:]),
+    ]
+
+    _headers, _body, details, *_rest = jobs_table(clusters, 0, 0)
+    text = "\n".join("".join(value for value, _style in row) for row in details)
+    styles = [style for row in details for _value, style in row]
+
+    assert "shared-analysis  4 history jobs" in text
+    assert "2 ALPHA" in text
+    assert "2 BETA" in text
+    assert "resources 4 CPU cores  ·  4G RAM" in text
+    assert "compute   0.17 CPU h  ·  0.33 GPU h  elapsed" in text
+    assert "2 succeeded" in text
+    assert "1 cancelled" in text
+    assert "1 failed" in text
+    assert "elapsed" in text
+    assert "median 2m30s" in text
+    assert {"free", "offline", "drained", "cpu"}.issubset(styles)
+
+
+def test_live_group_compute_hours_expand_per_node_gpu_requests() -> None:
+    jobs = [named_job(str(index), "multi-node") for index in range(1, 3)]
+    for job in jobs:
+        job.time_limit = "02:00:00"
+        job.node_count = 2
+        job.cpu_count = 4
+        job.memory = "8Gn"
+        job.tres_per_node = "gres/gpu:h100:3"
+    cluster = Cluster(name="GPU", host="login", jobs=jobs)
+
+    _headers, _body, details, *_rest = jobs_table([cluster], 0, 0)
+    text = "\n".join("".join(value for value, _style in row) for row in details)
+
+    assert "resources 8 CPU cores  ·  32G RAM" in text
+    assert "compute   16 CPU h  ·  24 GPU h  max at time limits" in text
 
 
 def test_job_groups_keep_current_and_history_sections_separate() -> None:
@@ -600,7 +661,8 @@ def test_jobs_table_separates_history_and_keeps_selected_details_separate() -> N
     sticky_text = "\n".join(
         "".join(value for value, _style in row) for row in sticky_headers
     )
-    assert sticky_text.startswith("RECENT HISTORY")
+    assert sticky_text.startswith("CLUSTER")
+    assert "RECENT HISTORY" in sticky_text
     assert "RESULT" in sticky_text
     assert "ELAPSED" in sticky_text
     assert render_offset == history_title + 3
